@@ -1,5 +1,10 @@
 from openultra_browser.browser import Browser
-from openultra_browser.models import ActionKind, BrowserSnapshot, CandidateAction
+from openultra_browser.models import (
+    ActionKind,
+    BrowserSnapshot,
+    CandidateAction,
+    ObservedElement,
+)
 
 
 def test_navigation_settlement_waits_for_new_document():
@@ -202,9 +207,47 @@ def test_blank_child_target_is_adopted_after_http_commit():
 
 def test_navigation_history_is_authoritative_for_back_capability():
     browser = object.__new__(Browser)
-    browser.call = lambda _method: {"currentIndex": 2}
+    browser.call = lambda _method: {
+        "currentIndex": 2,
+        "entries": [
+            {"url": "about:blank"},
+            {"url": "https://example.com/search"},
+            {"url": "https://example.com/details"},
+        ],
+    }
 
     assert browser._can_go_back(False)
+
+
+def test_internal_blank_history_does_not_offer_back_navigation():
+    browser = object.__new__(Browser)
+    browser.call = lambda _method: {
+        "currentIndex": 1,
+        "entries": [
+            {"url": "about:blank"},
+            {"url": "https://example.com"},
+        ],
+    }
+
+    assert not browser._can_go_back(True)
+
+
+def test_semantic_fingerprint_ignores_ephemeral_dom_identity():
+    left = BrowserSnapshot(
+        "https://example.com",
+        "Example",
+        "Visible content",
+        (ObservedElement("e1", "button", "Next image", "button", guard="old"),),
+    )
+    right = BrowserSnapshot(
+        "https://example.com",
+        "Example",
+        "Visible content",
+        (ObservedElement("e9", "button", "Next image", "button", guard="new"),),
+    )
+
+    assert left.fingerprint != right.fingerprint
+    assert left.semantic_fingerprint == right.semantic_fingerprint
 
 
 def test_active_target_recovers_to_the_latest_owned_http_page():

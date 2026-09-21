@@ -78,6 +78,17 @@ class LoginEngine:
         )
 
 
+class AuthenticationBrowser(FakeBrowser):
+    def __init__(self, url, *, text_limit):
+        super().__init__(url, text_limit=text_limit)
+        self.snapshot = BrowserSnapshot(
+            "https://accounts.example.com/signin",
+            "Sign in",
+            "Sign in to continue",
+            (),
+        )
+
+
 class UncertainBrowser(FakeBrowser):
     def __init__(self, url, *, text_limit):
         super().__init__(url, text_limit=text_limit)
@@ -187,7 +198,7 @@ def test_authentication_boundary_stops_without_attempting_credentials():
     result = BrowserAgent(
         RunConfig(goal="Dislike this video", start_url="https://example.com/done"),
         decision_engine=LoginEngine(),
-        browser_factory=FakeBrowser,
+        browser_factory=AuthenticationBrowser,
     ).run()
 
     assert result.status == "needs_login"

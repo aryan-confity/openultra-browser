@@ -331,7 +331,12 @@ class Browser:
     def _can_go_back(self, fallback: bool) -> bool:
         try:
             history = self.call("Page.getNavigationHistory")
-            return int(history.get("currentIndex", 0)) > 0
+            current_index = int(history.get("currentIndex", 0))
+            entries = history.get("entries") or []
+            return any(
+                _is_http_url(entry.get("url"))
+                for entry in entries[:current_index]
+            )
         except (RuntimeError, TypeError, ValueError):
             return fallback
 
@@ -549,6 +554,23 @@ class Browser:
         submission_started_at: float | None = None,
         calendar_range: tuple[str, str] | None = None,
     ) -> bool:
+        if kind in {ActionKind.SCROLL_DOWN, ActionKind.SCROLL_UP}:
+            self.evaluate(
+                """new Promise((resolve) => {
+                  const started = performance.now();
+                  let previous = scrollY, stableFrames = 0;
+                  const check = () => {
+                    const current = scrollY;
+                    stableFrames = current === previous ? stableFrames + 1 : 0;
+                    previous = current;
+                    if ((performance.now() - started >= 75 && stableFrames >= 3) ||
+                        performance.now() - started >= 750) resolve();
+                    else requestAnimationFrame(check);
+                  };
+                  requestAnimationFrame(check);
+                })""",
+                await_promise=True,
+            )
         if kind == ActionKind.FILL:
             self.evaluate(
                 f"""new Promise((resolve) => {{

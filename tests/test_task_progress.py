@@ -78,6 +78,27 @@ def test_visible_start_destination_advances_without_model_inference():
     assert progress.current_step == "click Condos for rent"
 
 
+def test_open_destination_advances_without_model_inference():
+    progress = TaskProgress.from_goal("Open youtube.com and search for Mr Robot")
+
+    progress.sync_visible_state(snapshot("https://www.youtube.com/", "YouTube"))
+
+    assert progress.completed_steps == ("Open youtube.com",)
+    assert progress.current_step == "search for Mr Robot"
+
+
+def test_search_and_its_submit_click_are_one_atomic_step():
+    progress = TaskProgress.from_goal(
+        "Open youtube.com and search for Mr Robot and click on search and play any video"
+    )
+
+    assert progress.steps == (
+        "Open youtube.com",
+        "search for Mr Robot and click on search",
+        "play any video",
+    )
+
+
 def test_confirmed_current_step_advances_exactly_once():
     progress = TaskProgress.from_goal(
         "Open Condos for rent and click Inquire in the first listing"
@@ -168,10 +189,56 @@ def test_filling_search_does_not_complete_it_before_submission():
     assert disposition == "pending"
 
 
+def test_matching_content_click_cannot_complete_a_search_step():
+    progress = TaskProgress(("search for Mr Robot",), history_boundary=0)
+    video = record("click")
+    video.description = "Activate link Mr Robot trailer"
+    video.change_summary = "URL changed: /results -> /watch?v=123"
+
+    assert step_completion_disposition(progress, decision(0.99), (video,)) == "pending"
+
+
 def test_click_navigation_is_authoritative_for_an_explicit_click_step():
     progress = TaskProgress(("click on it",), history_boundary=0)
     click = record("click")
     click.change_summary = "URL changed: https://example.com/results -> https://example.com/watch"
+
+    assert step_completion_disposition(progress, decision(0.1), (click,)) == "verified"
+
+
+def test_content_detail_navigation_is_authoritative_for_a_listing_step():
+    progress = TaskProgress(("click on any of their listing page",), history_boundary=0)
+    click = record("click")
+    click.description = (
+        "Activate link View details for Circle Condominium. "
+        "Visible content-detail destination for the requested item: YES."
+    )
+    click.change_summary = (
+        "URL changed: https://example.com/results -> https://example.com/properties/123"
+    )
+
+    assert step_completion_disposition(progress, decision(0.1), (click,)) == "verified"
+
+
+def test_content_detail_click_does_not_complete_before_navigation_is_observed():
+    progress = TaskProgress(("click on any of their listing page",), history_boundary=0)
+    click = record("click")
+    click.description = (
+        "Activate link View details for Circle Condominium. "
+        "Visible content-detail destination for the requested item: YES."
+    )
+    click.change_summary = "Added controls: Inquire"
+
+    assert step_completion_disposition(progress, decision(0.99), (click,)) == "pending"
+
+
+def test_changed_exact_play_control_completes_without_an_extra_side_effect():
+    progress = TaskProgress(("play any video",), history_boundary=0)
+    click = record("click")
+    click.description = (
+        "Activate button Play (k). Direct goal match: YES. Matched terms: play."
+    )
+    click.change_summary = "Added controls: Pause"
 
     assert step_completion_disposition(progress, decision(0.1), (click,)) == "verified"
 
@@ -203,6 +270,15 @@ def test_unrelated_changed_control_cannot_complete_a_step_at_high_confidence():
     assert step_completion_disposition(progress, decision(0.99), (wrong,)) == "pending"
 
 
+def test_generic_page_word_cannot_make_carousel_progress_complete_a_listing_step():
+    progress = TaskProgress(("click on any of their listing page",), history_boundary=0)
+    wrong = record("click")
+    wrong.description = "Activate button Next image. Direct goal match: no."
+    wrong.change_summary = "No semantic page change observed"
+
+    assert step_completion_disposition(progress, decision(0.99), (wrong,)) == "pending"
+
+
 def test_calendar_navigation_cannot_complete_before_exact_date_selection():
     progress = TaskProgress(("change the date to September 28th",), history_boundary=0)
     navigation = record("click")
@@ -224,16 +300,54 @@ def test_optional_login_does_not_block_a_direct_semantic_action():
         goal_match=True,
     )
 
-    assert not login_blocks_progress(model, (submit,))
+    page = BrowserSnapshot(
+        "https://www.youtube.com/",
+        "YouTube",
+        "Search Sign in",
+        (ObservedElement("e1", "searchbox", "Search", "input"),),
+    )
+
+    assert not login_blocks_progress(model, page, (submit,))
 
 
-def test_login_blocks_when_no_direct_semantic_action_remains():
+def test_optional_header_login_does_not_block_exploration():
     model = replace(decision(0.0), login_probability=0.8)
     scroll = CandidateAction(
         "scroll_down", ActionKind.SCROLL_DOWN, "Scroll down", goal_match=True
     )
+    page = BrowserSnapshot(
+        "https://wdxproperties.com/",
+        "Thailand Property and Real Estate Portal",
+        "Login Homes for Rent in Bangkok",
+        (ObservedElement("login", "link", "Login", "a"),),
+    )
 
-    assert login_blocks_progress(model, (scroll,))
+    assert not login_blocks_progress(model, page, (scroll,))
+
+
+def test_authentication_url_blocks_without_a_safe_escape():
+    model = replace(decision(0.0), login_probability=0.8)
+    wait = CandidateAction("wait", ActionKind.WAIT, "Wait")
+    page = BrowserSnapshot(
+        "https://accounts.google.com/v3/signin/identifier",
+        "Sign in - Google Accounts",
+        "Sign in",
+        (ObservedElement("email", "textbox", "Email or phone", "input"),),
+    )
+
+    assert login_blocks_progress(model, page, (wait,))
+
+
+def test_visible_password_field_is_browser_owned_authentication_evidence():
+    model = replace(decision(0.0), login_probability=0.9)
+    page = BrowserSnapshot(
+        "https://example.com/account",
+        "Welcome",
+        "Welcome back",
+        (ObservedElement("password", "textbox", "Password", "input", input_type="password"),),
+    )
+
+    assert login_blocks_progress(model, page, ())
 
 
 def test_login_page_does_not_block_a_confident_back_instruction():
@@ -246,7 +360,9 @@ def test_login_page_does_not_block_a_confident_back_instruction():
         login_probability=0.95,
     )
 
-    assert not login_blocks_progress(model, (back,))
+    page = BrowserSnapshot("https://example.com/login", "Sign in", "Sign in", ())
+
+    assert not login_blocks_progress(model, page, (back,))
 
 
 def test_login_page_does_not_block_a_confident_tab_escape():
@@ -268,7 +384,9 @@ def test_login_page_does_not_block_a_confident_tab_escape():
         login_probability=0.99,
     )
 
-    assert not login_blocks_progress(model, (switch,))
+    page = BrowserSnapshot("https://example.com/login", "Sign in", "Sign in", ())
+
+    assert not login_blocks_progress(model, page, (switch,))
 
 
 def test_model_error_does_not_block_without_browser_alert_evidence():

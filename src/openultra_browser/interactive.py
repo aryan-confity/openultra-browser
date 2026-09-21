@@ -187,7 +187,7 @@ class InteractiveAgent:
                 self.decision = None
                 self.policy_result = None
                 continue
-            if login_blocks_progress(self.decision, self.actions):
+            if login_blocks_progress(self.decision, self.snapshot, self.actions):
                 self.status = "needs_login"
                 self.reason = (
                     "The current outcome requires authentication in the isolated browser profile"
@@ -278,7 +278,8 @@ class InteractiveAgent:
             next_snapshot = self.browser.observe()
             record.change_summary = summarize_page_change(self.snapshot, next_snapshot)
             record.changed = (
-                next_snapshot.fingerprint != self.snapshot.fingerprint or transport_verified
+                next_snapshot.semantic_fingerprint != self.snapshot.semantic_fingerprint
+                or transport_verified
             )
             self.snapshot = next_snapshot
             self.status = "ready"

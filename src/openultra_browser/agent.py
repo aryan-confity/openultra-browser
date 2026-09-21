@@ -131,7 +131,7 @@ class BrowserAgent:
                     if progress.current_step and step_verified:
                         progress.advance_current_step(snapshot, action_count=len(history))
                         continue
-                    if login_blocks_progress(decision, actions):
+                    if login_blocks_progress(decision, snapshot, actions):
                         status = "needs_login"
                         reason = "The current outcome requires authentication in the isolated browser profile"
                         break
@@ -204,7 +204,9 @@ class BrowserAgent:
                     result_snapshot = next_snapshot
                     record.change_summary = summarize_page_change(snapshot, next_snapshot)
                     record.changed = (
-                        next_snapshot.fingerprint != snapshot.fingerprint or transport_verified
+                        next_snapshot.semantic_fingerprint
+                        != snapshot.semantic_fingerprint
+                        or transport_verified
                     )
                 except StalePage as error:
                     record.action_error = f"{type(error).__name__}: {error}"

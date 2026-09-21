@@ -161,6 +161,82 @@ def test_retained_search_field_cannot_hijack_a_later_click_step():
     assert any(action.element_id == "dislike" for action in result)
 
 
+def test_matching_home_recommendation_cannot_erase_pending_search_fill():
+    current = BrowserSnapshot(
+        "https://www.youtube.com/",
+        "YouTube",
+        "Mr Robot recommendations",
+        (
+            ObservedElement(
+                "search",
+                "combobox",
+                "Search",
+                "input",
+                submit_on_enter=True,
+            ),
+            ObservedElement(
+                "recommendation",
+                "link",
+                "Mr Robot Review",
+                "a",
+                href="/watch?v=review",
+            ),
+        ),
+        can_scroll_down=True,
+    )
+
+    result = build_actions(
+        current,
+        "search for mr robot and click on search",
+        {"search query": "mr robot"},
+        8,
+        False,
+    )
+
+    assert [action.action_id for action in result if action.kind == ActionKind.FILL] == [
+        "fill_search_search query"
+    ]
+    assert not any(action.element_id == "recommendation" for action in result)
+
+
+def test_filled_search_submit_excludes_suggestions_and_recommendations():
+    current = BrowserSnapshot(
+        "https://www.youtube.com/",
+        "YouTube",
+        "Mr Robot suggestions and recommendations",
+        (
+            ObservedElement(
+                "search",
+                "combobox",
+                "Search",
+                "input",
+                value="mr robot",
+                submit_on_enter=True,
+            ),
+            ObservedElement("suggestion", "button", "Mr. Robot", "button"),
+            ObservedElement(
+                "recommendation",
+                "link",
+                "Mr Robot Review",
+                "a",
+                href="/watch?v=review",
+            ),
+        ),
+        can_scroll_down=True,
+    )
+
+    result = build_actions(
+        current,
+        "search for mr robot and click on search",
+        {"search query": "mr robot"},
+        8,
+        False,
+    )
+
+    assert result[0].action_id == "submit_search"
+    assert not any(action.kind == ActionKind.CLICK for action in result)
+
+
 def test_observer_marks_form_associated_search_textareas_as_submittable():
     assert "['INPUT', 'TEXTAREA'].includes(node.tagName)" in OBSERVE_SCRIPT
     assert "(role === 'combobox' && label.toLowerCase().includes('search'))" in OBSERVE_SCRIPT
@@ -431,6 +507,122 @@ def test_unexplored_content_marks_scroll_as_progress_instead_of_waiting():
     assert by_id["scroll_down"].goal_match
     assert "unexplored content exists below: YES" in by_id["scroll_down"].description
     assert "wait" not in by_id
+
+
+def test_semantic_card_remains_eligible_when_lexical_goal_matching_misses():
+    current = BrowserSnapshot(
+        "https://wdxproperties.com/",
+        "WDX Properties",
+        "Homes for Rent in Bangkok Circle Condominium",
+        (
+            ObservedElement(
+                "card",
+                "link",
+                "View details for 2-BR Condo Circle Condominium",
+                "a",
+                href="/properties/2-br-condo-circle-condominium-356560",
+            ),
+        ),
+        can_scroll_down=True,
+    )
+
+    result = build_actions(current, "click on any of their listing page", {}, 6, False)
+    by_id = {action.action_id: action for action in result}
+
+    assert "click_card" in by_id
+    assert "scroll_down" in by_id
+    assert by_id["click_card"].goal_match
+    assert "Visible content-detail destination" in by_id["click_card"].description
+    assert not by_id["scroll_down"].goal_match
+    assert "unexplored content exists below: YES" not in by_id["scroll_down"].description
+
+
+def test_watch_link_is_a_content_target_for_any_video_request():
+    current = BrowserSnapshot(
+        "https://www.youtube.com/results?search_query=mr+robot",
+        "YouTube",
+        "Mr Robot results",
+        (
+            ObservedElement(
+                "video",
+                "link",
+                "Kernel Panic On Adderall | Mr. Robot",
+                "a",
+                href="/watch?v=0eAhMeswQdg",
+            ),
+        ),
+        can_scroll_down=True,
+    )
+
+    result = build_actions(current, "play any video", {}, 6, False)
+
+    assert result[0].action_id == "click_video"
+    assert result[0].goal_match
+
+
+def test_watch_page_prioritizes_playback_control_over_recommendations():
+    current = BrowserSnapshot(
+        "https://www.youtube.com/watch?v=current",
+        "YouTube",
+        "Current video",
+        (
+            ObservedElement("play", "button", "Play (k)", "button"),
+            ObservedElement(
+                "like",
+                "button",
+                "like this video along with 100 other people",
+                "button",
+            ),
+            ObservedElement(
+                "recommendation",
+                "link",
+                "Another Mr Robot Clip",
+                "a",
+                href="/watch?v=other",
+            ),
+        ),
+        can_scroll_down=True,
+    )
+
+    result = build_actions(current, "play any video", {}, 6, False)
+
+    assert [action.action_id for action in result if action.kind == ActionKind.CLICK] == [
+        "click_play"
+    ]
+
+
+def test_stateful_social_control_is_available_only_when_requested():
+    current = snapshot(
+        ObservedElement("like", "button", "like this video", "button"),
+        ObservedElement("dislike", "button", "Dislike", "button"),
+    )
+
+    play_actions = build_actions(current, "play any video", {}, 6, False)
+    dislike_actions = build_actions(current, "dislike this video", {}, 6, False)
+
+    assert not any(action.element_id in {"like", "dislike"} for action in play_actions)
+    assert [action.element_id for action in dislike_actions if action.kind == ActionKind.CLICK] == [
+        "dislike"
+    ]
+
+
+def test_generic_logo_is_removed_when_meaningful_controls_exist():
+    current = BrowserSnapshot(
+        "https://wdxproperties.com/",
+        "WDX Properties",
+        "Find a home",
+        (
+            ObservedElement("logo", "link", "Logo", "a", href="/"),
+            ObservedElement("rent", "button", "Rent", "button"),
+            ObservedElement("condos", "button", "Condos for rent", "button"),
+        ),
+        can_scroll_down=True,
+    )
+
+    result = build_actions(current, "click on any of their listing page", {}, 8, False)
+
+    assert "click_logo" not in {action.action_id for action in result}
+    assert {"click_rent", "click_condos"} <= {action.action_id for action in result}
 
 
 def test_visible_busy_state_offers_wait_without_hiding_ready_targets():

@@ -255,6 +255,17 @@ GOAL_STOPWORDS = {
     "website",
 }
 
+STATEFUL_CONTROL_VERBS = {
+    "dislike",
+    "follow",
+    "like",
+    "save",
+    "share",
+    "subscribe",
+    "unfollow",
+    "unsubscribe",
+}
+
 
 def _goal_terms(value: str) -> set[str]:
     return _tokens(value) - GOAL_STOPWORDS
@@ -269,6 +280,10 @@ def _score(element: ObservedElement, goal: str) -> float:
 def _matched_goal_terms(element: ObservedElement, goal: str) -> set[str]:
     goal_terms = _goal_terms(goal)
     element_terms = _tokens(element.goal_description)
+    requested_stateful = goal_terms & STATEFUL_CONTROL_VERBS
+    element_stateful = element_terms & STATEFUL_CONTROL_VERBS
+    if element_stateful and not requested_stateful & element_stateful:
+        return set()
     matches = goal_terms & element_terms
     if "submit" in goal_terms and element_terms & {"send", "continue"}:
         matches.add("submit")
@@ -283,6 +298,38 @@ def _goal_match(element: ObservedElement, goal: str) -> str:
             f"Matched terms: {', '.join(matches)}."
         )
     return " Direct goal match: no."
+
+
+def _content_detail_match(element: ObservedElement, goal: str, current_url: str) -> bool:
+    """Recognize explicit content-detail destinations without site-specific routes."""
+    if element.role != "link" or not element.href:
+        return False
+    goal_terms = _goal_terms(goal)
+    if not goal_terms & {
+        "article",
+        "details",
+        "item",
+        "listing",
+        "option",
+        "product",
+        "property",
+        "result",
+        "video",
+    }:
+        return False
+    label = element.name.casefold()
+    path_terms = _tokens(urlparse(element.href).path)
+    current_path_terms = _tokens(urlparse(current_url).path)
+    if (
+        "video" in goal_terms
+        and path_terms & {"video", "videos", "watch"}
+        and not current_path_terms & {"video", "videos", "watch"}
+    ):
+        return True
+    return bool(
+        re.search(r"\b(?:view|open|read|watch)\b.{0,40}\bdetails?\b", label)
+        or re.search(r"\bdetails?\s+(?:for|of)\b", label)
+    )
 
 
 def _prepared_keys_for_element(
@@ -325,6 +372,36 @@ def _url_has_submitted_value(url: str, value: str) -> bool:
             candidate for _, candidate in parse_qsl(parsed.fragment.split("?", 1)[1])
         )
     return any(" ".join(candidate.casefold().split()) == expected for candidate in candidates)
+
+
+def _is_meaningful_candidate(
+    action: CandidateAction, elements_by_id: Mapping[str, ObservedElement]
+) -> bool:
+    """Distinguish real page controls from generic chrome such as a home logo."""
+    if action.kind not in {
+        ActionKind.CLICK,
+        ActionKind.FILL,
+        ActionKind.PRESS_ENTER,
+        ActionKind.SELECT,
+    }:
+        return False
+    element = elements_by_id.get(action.element_id or "")
+    if element is None:
+        return False
+    label = element.name.strip().casefold()
+    if label in {
+        "",
+        "button",
+        "clickable",
+        "home",
+        "link",
+        "logo",
+        "menu",
+        "unlabelled",
+    }:
+        target = urlparse(action.target_url or "")
+        return bool(target.path and target.path != "/")
+    return True
 
 
 MONTHS = {
@@ -422,6 +499,9 @@ def build_actions(
     strong_action_ids: set[str] = set()
     elements_by_id = {element.element_id: element for element in snapshot.elements}
     for element in snapshot.elements:
+        element_stateful = _tokens(element.goal_description) & STATEFUL_CONTROL_VERBS
+        if element_stateful and not element_stateful & _goal_terms(matching_goal):
+            continue
         target_url = urljoin(snapshot.url, element.href) if element.href else None
         prefix_match = bool(
             success_url_prefix and target_url and target_url.startswith(success_url_prefix)
@@ -439,7 +519,10 @@ def build_actions(
             30 if preferred_match else 0
         )
         label_goal_match = bool(_matched_goal_terms(element, matching_goal))
-        goal_match = label_goal_match or verifier_match
+        content_detail_match = _content_detail_match(
+            element, matching_goal, snapshot.url
+        )
+        goal_match = label_goal_match or content_detail_match or verifier_match
         verifier_fact = (
             " Destination matches the required success URL: YES."
             if verifier_match
@@ -448,6 +531,11 @@ def build_actions(
         preferred_fact = (
             " Destination is an explicitly approved non-start domain: YES."
             if preferred_match
+            else ""
+        )
+        content_detail_fact = (
+            " Visible content-detail destination for the requested item: YES."
+            if content_detail_match
             else ""
         )
         editable = element.role in {"textbox", "searchbox", "spinbutton"} or (
@@ -477,6 +565,7 @@ def build_actions(
                             + progress_fact
                             + verifier_fact
                             + preferred_fact
+                            + content_detail_fact
                             + _goal_match(element, matching_goal),
                             element.element_id,
                             input_key=input_key,
@@ -510,6 +599,7 @@ def build_actions(
                         f"Open or focus {element.semantic_description}."
                         + verifier_fact
                         + preferred_fact
+                        + content_detail_fact
                         + _goal_match(element, matching_goal),
                         element.element_id,
                         goal_match=goal_match,
@@ -538,6 +628,7 @@ def build_actions(
                             f"Select '{option.label}' in {element.description}."
                             + verifier_fact
                             + preferred_fact
+                            + content_detail_fact
                             + _goal_match(element, matching_goal),
                             element.element_id,
                             option=option.label,
@@ -553,6 +644,7 @@ def build_actions(
                 f"Activate {element.description}."
                 + verifier_fact
                 + preferred_fact
+                + content_detail_fact
                 + _goal_match(element, matching_goal),
                 element.element_id,
                 target_url=target_url,
@@ -671,6 +763,24 @@ def build_actions(
             if action.kind in {ActionKind.FILL, ActionKind.SELECT}
             or action.action_id in form_control_ids
         ]
+        # Strong matches were computed before pending form work narrowed the
+        # action space. Do not let a now-removed page recommendation erase the
+        # remaining prepared fill or select action.
+        remaining_action_ids = {action.action_id for _, action in ranked}
+        strong_action_ids.intersection_update(remaining_action_ids)
+
+    pending_search_submit_ids = {
+        action.action_id
+        for _, action in ranked
+        if action.kind == ActionKind.PRESS_ENTER and action.goal_match
+    }
+    if pending_search_submit_ids:
+        ranked = [
+            (score, action)
+            for score, action in ranked
+            if action.action_id in pending_search_submit_ids
+        ]
+        strong_action_ids.intersection_update(pending_search_submit_ids)
 
     if "first" in _tokens(goal):
         first_matching_click = next(
@@ -759,6 +869,22 @@ def build_actions(
     if not strong_action_ids and not transition_pending and has_direct_target:
         ranked = [(score, action) for score, action in ranked if action.goal_match]
 
+    # Remove generic page chrome once the observer has labelled real controls.
+    # Content-detail links and exact matches above remain deterministic progress;
+    # otherwise scrolling is the bounded exploration action.
+    meaningful_action_ids = {
+        action.action_id
+        for _, action in ranked
+        if _is_meaningful_candidate(action, elements_by_id)
+    }
+    if meaningful_action_ids:
+        ranked = [
+            (score, action)
+            for score, action in ranked
+            if action.action_id in meaningful_action_ids
+        ]
+    scroll_is_only_progress = not has_direct_target
+
     controls: list[CandidateAction] = []
     visibly_busy = any(element.busy is True for element in snapshot.elements)
     if calendar_transition_pending:
@@ -788,10 +914,10 @@ def build_actions(
                 (
                     "Scroll down. Deterministic planner: no direct target is visible and "
                     "unexplored content exists below: YES."
-                    if not has_direct_target
+                    if scroll_is_only_progress
                     else "Scroll down for more content"
                 ),
-                goal_match=not has_direct_target,
+                goal_match=scroll_is_only_progress,
             )
         )
     if snapshot.can_scroll_up and not calendar_transition_pending:

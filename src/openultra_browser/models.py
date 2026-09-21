@@ -138,6 +138,31 @@ class BrowserSnapshot:
             json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
+    @property
+    def semantic_fingerprint(self) -> str:
+        """Stable progress identity that excludes ephemeral DOM node handles."""
+        elements = [
+            {
+                key: value
+                for key, value in asdict(element).items()
+                if key not in {"element_id", "guard", "x", "y", "width", "height"}
+            }
+            for element in self.elements
+        ]
+        stable = {
+            "url": self.url,
+            "title": self.title,
+            "text": self.visible_text,
+            "elements": elements,
+            "tabs": [
+                {"title": tab.title, "url": tab.url, "active": tab.active}
+                for tab in self.tabs
+            ],
+        }
+        return hashlib.sha256(
+            json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
 
 @dataclass(frozen=True)
 class CandidateAction:
