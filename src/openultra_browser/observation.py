@@ -212,19 +212,57 @@ def _goal_terms(value: str) -> set[str]:
 
 
 def _score(element: ObservedElement, goal: str) -> float:
-    overlap = len(_goal_terms(goal) & _tokens(element.goal_description))
+    overlap = len(_matched_goal_terms(element, goal))
     role_bonus = 2 if element.role in {"button", "link", "searchbox", "textbox"} else 0
     return overlap * 5 + role_bonus + (1 if element.name else -2) + max(0, 1 - element.y / 2_000)
 
 
+def _matched_goal_terms(element: ObservedElement, goal: str) -> set[str]:
+    goal_terms = _goal_terms(goal)
+    element_terms = _tokens(element.goal_description)
+    matches = goal_terms & element_terms
+    if "submit" in goal_terms and element_terms & {"send", "continue"}:
+        matches.add("submit")
+    return matches
+
+
 def _goal_match(element: ObservedElement, goal: str) -> str:
-    matches = sorted(_goal_terms(goal) & _tokens(element.goal_description))
+    matches = sorted(_matched_goal_terms(element, goal))
     if matches:
         return (
             " Direct goal match: YES. Prefer over controls with no match. "
             f"Matched terms: {', '.join(matches)}."
         )
     return " Direct goal match: no."
+
+
+def _prepared_keys_for_element(
+    element: ObservedElement, prepared_inputs: Mapping[str, str]
+) -> list[str]:
+    element_terms = _tokens(element.goal_description)
+    if "search" in element_terms:
+        element_terms.add("query")
+    scored = [
+        (len(_tokens(key) & element_terms), key)
+        for key in prepared_inputs
+        if _tokens(key) & element_terms
+    ]
+    if scored:
+        best = max(score for score, _ in scored)
+        return [key for score, key in scored if score == best]
+    if len(prepared_inputs) == 1 and element.submit_on_enter:
+        return list(prepared_inputs)
+    return []
+
+
+def _prepared_value_is_satisfied(input_key: str, actual: str, expected: str) -> bool:
+    if actual.strip().casefold() == expected.strip().casefold():
+        return True
+    if _tokens(input_key) & {"phone", "whatsapp", "mobile", "telephone"}:
+        actual_digits = re.sub(r"\D", "", actual).lstrip("0")
+        expected_digits = re.sub(r"\D", "", expected).lstrip("0")
+        return bool(actual_digits and actual_digits == expected_digits)
+    return False
 
 
 def build_actions(
@@ -265,7 +303,7 @@ def build_actions(
         score = _score(element, goal) + (40 if verifier_match else 0) + (
             30 if preferred_match else 0
         )
-        label_goal_match = bool(_goal_terms(goal) & _tokens(element.goal_description))
+        label_goal_match = bool(_matched_goal_terms(element, goal))
         goal_match = label_goal_match or verifier_match
         verifier_fact = (
             " Destination matches the required success URL: YES."
@@ -281,12 +319,12 @@ def build_actions(
             element.role == "combobox" and element.tag != "select"
         )
         if editable:
-            for input_key in prepared_inputs:
-                if element.value == prepared_inputs[input_key]:
+            for input_key in _prepared_keys_for_element(element, prepared_inputs):
+                if _prepared_value_is_satisfied(
+                    input_key, element.value, prepared_inputs[input_key]
+                ):
                     continue
-                prepared_goal_match = bool(
-                    _goal_terms(goal) & _tokens(prepared_inputs[input_key])
-                ) or (len(prepared_inputs) == 1 and element.submit_on_enter)
+                prepared_goal_match = True
                 progress_fact = (
                     " Prepared value directly advances the goal: YES."
                     if prepared_goal_match
@@ -339,10 +377,21 @@ def build_actions(
                 )
             )
         elif element.tag == "select":
-            for index, option in enumerate(element.options[:8]):
+            prepared_keys = _prepared_keys_for_element(element, prepared_inputs)
+            desired = prepared_inputs[prepared_keys[0]] if prepared_keys else None
+            options = [
+                (index, option)
+                for index, option in enumerate(element.options[:8])
+                if desired is None
+                or desired.casefold() in {option.label.casefold(), option.value.casefold()}
+            ]
+            for index, option in options:
+                option_goal_match = bool(
+                    _goal_terms(goal) & _tokens(option.label)
+                ) or desired is not None
                 ranked.append(
                     (
-                        score,
+                        score + (20 if option_goal_match else 0),
                         CandidateAction(
                             f"select_{element.element_id}_{index}",
                             ActionKind.SELECT,
@@ -353,7 +402,7 @@ def build_actions(
                             element.element_id,
                             option=option.label,
                             option_value=option.value,
-                            goal_match=goal_match,
+                            goal_match=goal_match or option_goal_match,
                         ),
                     )
                 )
@@ -377,6 +426,23 @@ def build_actions(
             )
             if verifier_match or preferred_match:
                 strong_action_ids.add(action.action_id)
+
+    has_pending_form_value = any(
+        action.kind in {ActionKind.FILL, ActionKind.SELECT} and action.goal_match
+        for _, action in ranked
+    )
+    if has_pending_form_value:
+        form_control_ids = {
+            f"click_{element.element_id}"
+            for element in snapshot.elements
+            if element.role in {"checkbox", "radio", "switch"}
+        }
+        ranked = [
+            (score, action)
+            for score, action in ranked
+            if action.kind in {ActionKind.FILL, ActionKind.SELECT}
+            or action.action_id in form_control_ids
+        ]
 
     if "first" in _tokens(goal):
         for index, (score, action) in enumerate(ranked):

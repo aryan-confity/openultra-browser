@@ -254,7 +254,9 @@ class OpenUltraDecisionEngine:
                     "type": "noul",
                     "instructions": (
                         "Was the requested task sequence completed? Judge only the verified "
-                        "changed prior steps and the current observed page."
+                        "changed prior steps and the current observed page. For a task that only "
+                        "asks to submit a form, verified transport evidence proves dispatch; do not "
+                        "require the site to claim downstream business acceptance."
                     ),
                     "criteria": {
                         "false": (

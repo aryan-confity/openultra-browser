@@ -20,6 +20,20 @@ SEARCH_PATTERN = re.compile(
     r"(?=\s*(?:,|\bthen\b|\band\s+(?:open|go|click|find|show|visit|select)\b|$))",
     re.IGNORECASE,
 )
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+PHONE_PATTERN = re.compile(r"(?<!\w)(\+?\d[\d ()-]{6,}\d)(?!\w)")
+NAME_PATTERN = re.compile(
+    r"\bname\s*(?:is|:|=)?\s*([A-Z][A-Za-z .'-]{1,79}?)(?=\s*(?:,|;|\band\b|$))",
+    re.IGNORECASE,
+)
+SUBMIT_SEQUENCE_PATTERN = re.compile(
+    r"\bsubmit\s+([A-Za-z][A-Za-z .'-]{1,79}?)\s*,\s*(\+?\d[\d ()-]{6,}\d)",
+    re.IGNORECASE,
+)
+LINE_ID_PATTERNS = (
+    re.compile(r"\b([A-Za-z0-9_.@-]{2,80})\s+line\s+id\b", re.IGNORECASE),
+    re.compile(r"\bline\s+id\s*(?:is|:|=)\s*([A-Za-z0-9_.@-]{2,80})", re.IGNORECASE),
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +65,45 @@ def _search_text(goal: str) -> str | None:
     return None
 
 
+def _form_inputs(goal: str) -> dict[str, str]:
+    """Extract only explicit personal/form values; never invent missing data."""
+    values: dict[str, str] = {}
+    sequence = SUBMIT_SEQUENCE_PATTERN.search(goal)
+    name = NAME_PATTERN.search(goal)
+    phone = PHONE_PATTERN.search(goal)
+    email = EMAIL_PATTERN.search(goal)
+    if sequence:
+        values["name"] = sequence.group(1).strip()
+        values["phone"] = re.sub(r"[^+\d]", "", sequence.group(2))
+    else:
+        if name:
+            values["name"] = name.group(1).strip()
+        if phone:
+            values["phone"] = re.sub(r"[^+\d]", "", phone.group(1))
+    if email:
+        values["email"] = email.group(0)
+
+    for pattern in LINE_ID_PATTERNS:
+        match = pattern.search(goal)
+        if match:
+            values["line id"] = match.group(1)
+            break
+
+    if "phone" in values and re.search(
+        r"\b(?:whatsapp.{0,24}same|same.{0,24}whatsapp)\b", goal, re.IGNORECASE
+    ):
+        values["whatsapp number"] = values["phone"]
+
+    intent = re.search(
+        r"\b(?:looking\s+to|choose|select)\s+(?:looking\s+to\s+)?(rent|sell)\b",
+        goal,
+        re.IGNORECASE,
+    )
+    if intent:
+        values["rent or sell"] = intent.group(1).title()
+    return values
+
+
 def plan_task(goal: str) -> TaskSetup:
     """Choose a starting page and literal task-supplied text without model generation."""
     goal = goal.strip()
@@ -62,8 +115,9 @@ def plan_task(goal: str) -> TaskSetup:
     destination = _explicit_destination(goal)
     if asks_for_search:
         return TaskSetup(GOOGLE_START_URL, {"search query": search_text})
+    form_inputs = _form_inputs(goal)
     if destination:
         parsed = urlparse(destination)
         if parsed.scheme in {"http", "https"} and parsed.hostname:
-            return TaskSetup(destination)
+            return TaskSetup(destination, form_inputs)
     return TaskSetup(GOOGLE_START_URL, {"search query": goal})

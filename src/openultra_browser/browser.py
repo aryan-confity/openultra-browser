@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 
@@ -98,11 +99,46 @@ VALIDATE_TARGET_SCRIPT = r"""
 }
 """
 
+SUBMISSION_OUTCOME_SCRIPT = r"""
+({ startedAt, beforeUrl, timeoutMs }) => new Promise((resolve) => {
+  const finishAt = performance.now() + timeoutMs;
+  const check = () => {
+    if (location.href !== beforeUrl) {
+      resolve({ verified: true, status: null, path: new URL(location.href).pathname });
+      return;
+    }
+    const entries = performance.getEntriesByType('resource').filter((entry) =>
+      entry.startTime >= startedAt && ['fetch', 'xmlhttprequest'].includes(entry.initiatorType)
+    ).map((entry) => {
+      const url = new URL(entry.name, location.href);
+      return { status: Number(entry.responseStatus || 0), path: url.pathname, sameOrigin: url.origin === location.origin };
+    }).filter((entry) => entry.sameOrigin && entry.path !== '/api/auth/session');
+    const failure = [...entries].reverse().find((entry) => entry.status >= 400);
+    if (failure) {
+      resolve({ verified: false, status: failure.status, path: failure.path });
+      return;
+    }
+    const success = [...entries].reverse().find((entry) => entry.status >= 200 && entry.status < 400);
+    if (success) {
+      resolve({ verified: true, status: success.status, path: success.path });
+      return;
+    }
+    if (performance.now() >= finishAt) {
+      resolve({ verified: false, status: null, path: null });
+      return;
+    }
+    setTimeout(check, 50);
+  };
+  check();
+})
+"""
+
 
 class Browser:
     def __init__(self, url: str, *, text_limit: int = 3_500) -> None:
         ensure_daemon()
         self.text_limit = text_limit
+        self.last_action_evidence: str | None = None
         self.target = cdp("Target.createTarget", url="about:blank", background=False)["targetId"]
         self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
         self.call(
@@ -159,7 +195,8 @@ class Browser:
         action: CandidateAction,
         snapshot: BrowserSnapshot,
         prepared_inputs: dict[str, str],
-    ) -> None:
+    ) -> bool:
+        self.last_action_evidence = None
         before_url = self.url
         if before_url != snapshot.url:
             raise StalePage("Page navigated after observation; refusing a stale action")
@@ -173,7 +210,7 @@ class Browser:
                 deltaY=560,
             )
             self._settle(action.kind)
-            return
+            return False
         if action.kind == ActionKind.SCROLL_UP:
             self.call(
                 "Input.dispatchMouseEvent",
@@ -184,7 +221,7 @@ class Browser:
                 deltaY=-560,
             )
             self._settle(action.kind)
-            return
+            return False
         if action.kind == ActionKind.BACK:
             try:
                 self.evaluate("history.back(); true")
@@ -193,12 +230,12 @@ class Browser:
                 raise ExecutionUncertain(
                     "History navigation may have executed; inspect before retrying"
                 ) from error
-            return
+            return False
         if action.kind == ActionKind.WAIT:
             time.sleep(0.1)
-            return
+            return False
         if action.kind in {ActionKind.DONE, ActionKind.BLOCKED}:
-            return
+            return False
         if not action.element_id:
             raise ValueError(f"{action.kind} requires an observed element")
 
@@ -209,6 +246,15 @@ class Browser:
             raise RuntimeError("Observed target is absent from the bound snapshot")
         if action.kind == ActionKind.FILL and action.input_key not in prepared_inputs:
             raise RuntimeError("Prepared input is unavailable")
+        is_submit = bool(
+            action.kind == ActionKind.CLICK
+            and element.role == "button"
+            and (
+                element.input_type == "submit"
+                or re.search(r"\b(?:send|submit)\b", element.name, re.IGNORECASE)
+            )
+        )
+        submission_started_at = self.evaluate("performance.now()") if is_submit else None
         request = {
             "nodeId": int(action.element_id.removeprefix("e")),
             "expectedGuard": element.guard,
@@ -261,7 +307,7 @@ class Browser:
                     )
             elif action.kind != ActionKind.SELECT:
                 raise ValueError(f"Unsupported action kind: {action.kind}")
-            self._settle(
+            return self._settle(
                 action.kind,
                 before_url=before_url,
                 expect_navigation=bool(
@@ -269,6 +315,7 @@ class Browser:
                     or action.kind == ActionKind.PRESS_ENTER
                 ),
                 autocomplete=bool(target.get("autocomplete")),
+                submission_started_at=submission_started_at,
             )
         except ExecutionUncertain:
             raise
@@ -284,7 +331,8 @@ class Browser:
         before_url: str | None = None,
         expect_navigation: bool = False,
         autocomplete: bool = False,
-    ) -> None:
+        submission_started_at: float | None = None,
+    ) -> bool:
         if kind == ActionKind.FILL:
             self.evaluate(
                 f"""new Promise((resolve) => {{
@@ -305,7 +353,7 @@ class Browser:
                 }})""",
                 await_promise=True,
             )
-            return
+            return False
         if kind == ActionKind.PRESS_ENTER and expect_navigation and before_url:
             navigated = self._wait_for_navigation(before_url)
             if not navigated:
@@ -320,10 +368,27 @@ class Browser:
                 )
                 if submitted:
                     self._wait_for_navigation(before_url)
-            return
+            return False
         if expect_navigation and before_url:
-            self._wait_for_navigation(before_url)
-            return
+            return self._wait_for_navigation(before_url)
+        if submission_started_at is not None and before_url:
+            outcome = self.evaluate(
+                f"({SUBMISSION_OUTCOME_SCRIPT})({json.dumps({'startedAt': submission_started_at, 'beforeUrl': before_url, 'timeoutMs': 8_000})})",
+                await_promise=True,
+            )
+            if outcome and outcome.get("status") and outcome["status"] >= 400:
+                self.last_action_evidence = (
+                    f"Submission request reached {outcome.get('path') or 'the site'} "
+                    f"and received HTTP {outcome['status']}; it was not retried"
+                )
+                return True
+            if outcome and outcome.get("verified"):
+                status = f"HTTP {outcome['status']}" if outcome.get("status") else "navigation"
+                self.last_action_evidence = (
+                    f"Submission request reached {outcome.get('path') or 'the destination'} "
+                    f"with {status} evidence"
+                )
+            return bool(outcome and outcome.get("verified"))
         try:
             self.evaluate(
                 "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
@@ -331,6 +396,7 @@ class Browser:
             )
         except RuntimeError:
             pass
+        return False
 
     def _wait_for_navigation(self, before_url: str, timeout_seconds: float = 2.0) -> bool:
         deadline = time.monotonic() + timeout_seconds

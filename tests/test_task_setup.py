@@ -31,3 +31,31 @@ def test_generic_task_uses_the_task_as_search_text():
     assert setup.prepared_inputs == {
         "search query": "Find the official documentation for Python dataclasses"
     }
+
+
+def test_explicit_form_details_are_bound_without_inventing_missing_values():
+    setup = plan_task(
+        "Go to wdxproperties.com, fill the form and submit Aryan, 0637859636, "
+        "same as WhatsApp, and aryan line ID looking to rent"
+    )
+
+    assert setup.prepared_inputs == {
+        "name": "Aryan",
+        "phone": "0637859636",
+        "line id": "aryan",
+        "whatsapp number": "0637859636",
+        "rent or sell": "Rent",
+    }
+
+
+def test_form_parser_leaves_unprovided_optional_details_absent():
+    setup = plan_task(
+        "Go to wdxproperties.com, fill this form and submit Aryan, 0637859636, "
+        "and choose looking to rent"
+    )
+
+    assert setup.prepared_inputs == {
+        "name": "Aryan",
+        "phone": "0637859636",
+        "rent or sell": "Rent",
+    }

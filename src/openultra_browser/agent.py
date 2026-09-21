@@ -144,17 +144,29 @@ class BrowserAgent:
                     break
 
                 try:
-                    browser.act(chosen, snapshot, self.config.prepared_inputs)
+                    transport_verified = bool(
+                        browser.act(chosen, snapshot, self.config.prepared_inputs)
+                    )
+                    evidence = getattr(browser, "last_action_evidence", None)
+                    if evidence:
+                        record.description += f" Execution evidence: {evidence}."
                     next_snapshot = browser.observe()
-                    record.changed = next_snapshot.fingerprint != snapshot.fingerprint
-                    progress.record_verified_action(chosen, snapshot, next_snapshot)
+                    record.changed = (
+                        next_snapshot.fingerprint != snapshot.fingerprint or transport_verified
+                    )
+                    progress.record_verified_action(
+                        chosen,
+                        snapshot,
+                        next_snapshot,
+                        verified_change=transport_verified,
+                    )
                 except StalePage as error:
                     record.action_error = f"{type(error).__name__}: {error}"
                     record.executed_action = None
                 except ExecutionUncertain as error:
                     record.action_error = f"{type(error).__name__}: {error}"
                     status = "needs_verification"
-                    reason = "Browser input may have executed; automatic retry is unsafe"
+                    reason = str(error)
                 except Exception as error:
                     record.action_error = f"{type(error).__name__}: {error}"
                 record.elapsed_ms = (time.perf_counter() - step_started) * 1_000

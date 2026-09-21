@@ -207,10 +207,22 @@ class InteractiveAgent:
             return self.state()
 
         try:
-            self.browser.act(chosen, self.snapshot, self.config.prepared_inputs)
+            transport_verified = bool(
+                self.browser.act(chosen, self.snapshot, self.config.prepared_inputs)
+            )
+            evidence = getattr(self.browser, "last_action_evidence", None)
+            if evidence:
+                record.description += f" Execution evidence: {evidence}."
             next_snapshot = self.browser.observe()
-            record.changed = next_snapshot.fingerprint != self.snapshot.fingerprint
-            self.progress.record_verified_action(chosen, self.snapshot, next_snapshot)
+            record.changed = (
+                next_snapshot.fingerprint != self.snapshot.fingerprint or transport_verified
+            )
+            self.progress.record_verified_action(
+                chosen,
+                self.snapshot,
+                next_snapshot,
+                verified_change=transport_verified,
+            )
             self.snapshot = next_snapshot
             self.status = "ready"
             self.reason = "Page observed and ready for a decision"
@@ -223,7 +235,7 @@ class InteractiveAgent:
         except ExecutionUncertain as error:
             record.action_error = f"{type(error).__name__}: {error}"
             self.status = "needs_verification"
-            self.reason = "Browser input may have executed; automatic retry is unsafe"
+            self.reason = str(error)
         except Exception as error:
             record.action_error = f"{type(error).__name__}: {error}"
             self.status = "ready"

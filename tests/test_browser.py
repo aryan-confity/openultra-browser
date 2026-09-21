@@ -59,3 +59,36 @@ def test_close_is_idempotent_when_target_is_already_absent(monkeypatch):
 
     assert calls == 1
     assert browser.target is None
+
+
+def test_submit_transport_response_is_execution_evidence_without_retry():
+    browser = object.__new__(Browser)
+    browser.evaluate = lambda _expression, **_kwargs: {
+        "verified": False,
+        "status": 502,
+        "path": "/api/listProperty",
+    }
+
+    assert browser._settle(
+        ActionKind.CLICK,
+        before_url="https://example.com/form",
+        submission_started_at=100.0,
+    )
+    assert "HTTP 502" in browser.last_action_evidence
+    assert "/api/listProperty" in browser.last_action_evidence
+
+
+def test_submit_transport_success_is_execution_evidence():
+    browser = object.__new__(Browser)
+    browser.evaluate = lambda _expression, **_kwargs: {
+        "verified": True,
+        "status": 201,
+        "path": "/api/forms",
+    }
+
+    assert browser._settle(
+        ActionKind.CLICK,
+        before_url="https://example.com/form",
+        submission_started_at=100.0,
+    )
+    assert "HTTP 201" in browser.last_action_evidence

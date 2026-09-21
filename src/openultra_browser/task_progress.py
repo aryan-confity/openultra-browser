@@ -9,9 +9,9 @@ from urllib.parse import urlparse
 from .models import ActionKind, BrowserSnapshot, CandidateAction
 
 STEP_BOUNDARY = re.compile(
-    r"(?:,\s*|\s+)(?:and\s+then|then|and)\s+"
+    r"(?:\s*[,;]\s*|\s+(?:and\s+then|then|and)\s+)"
     r"(?=(?:go|open|click|select|choose|find|get|visit|navigate|search|show|read|view|"
-    r"submit|enter|type|press|pick)\b)",
+    r"fill|submit|enter|type|press|pick)\b)",
     re.IGNORECASE,
 )
 URL_PATTERN = re.compile(r"https?://[^\s,]+", re.IGNORECASE)
@@ -25,8 +25,16 @@ NAVIGATION_PREFIX = re.compile(r"^\s*(?:go|visit|navigate)\b", re.IGNORECASE)
 
 def split_task_steps(goal: str) -> tuple[str, ...]:
     """Split explicit ordered action clauses without inventing a plan."""
-    steps = tuple(part.strip(" ,.;") for part in STEP_BOUNDARY.split(goal) if part.strip(" ,.;"))
-    return steps or (goal.strip(),)
+    raw = [part.strip(" ,.;") for part in STEP_BOUNDARY.split(goal) if part.strip(" ,.;")]
+    steps: list[str] = []
+    for part in raw:
+        if steps and re.match(r"^(?:submit|select|choose)\b", part, re.IGNORECASE) and re.match(
+            r"^fill\b", steps[-1], re.IGNORECASE
+        ):
+            steps[-1] += f" and {part}"
+        else:
+            steps.append(part)
+    return tuple(steps) or (goal.strip(),)
 
 
 def _requested_hostname(step: str) -> str | None:
@@ -77,6 +85,8 @@ class TaskProgress:
         action: CandidateAction,
         before: BrowserSnapshot,
         after: BrowserSnapshot,
+        *,
+        verified_change: bool = False,
     ) -> None:
         semantic_actions = {
             ActionKind.CLICK,
@@ -84,10 +94,20 @@ class TaskProgress:
             ActionKind.PRESS_ENTER,
             ActionKind.SELECT,
         }
+        current = self.current_step or ""
+        if action.kind in {ActionKind.FILL, ActionKind.SELECT} and re.search(
+            r"\bsubmit\b", current, re.IGNORECASE
+        ):
+            return
+        if re.search(r"\bsubmit\b", current, re.IGNORECASE) and action.kind == ActionKind.CLICK:
+            if not re.search(r"\b(?:send|submit|continue)\b", action.description, re.IGNORECASE):
+                return
+            if not verified_change:
+                return
         if (
             self.complete
             or action.kind not in semantic_actions
-            or before.fingerprint == after.fingerprint
+            or (before.fingerprint == after.fingerprint and not verified_change)
             or not action.goal_match
         ):
             return

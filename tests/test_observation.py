@@ -261,6 +261,104 @@ def test_completed_ordered_task_exposes_only_completion():
     assert [action.action_id for action in result] == ["done"]
 
 
+def test_form_values_bind_only_to_matching_fields_and_hold_submit():
+    result = build_actions(
+        snapshot(
+            ObservedElement("e1", "textbox", "Name*", "input"),
+            ObservedElement("e2", "textbox", "Phone*", "input"),
+            ObservedElement("e3", "textbox", "WhatsApp Number", "input"),
+            ObservedElement("e4", "textbox", "Line ID", "input"),
+            ObservedElement("e5", "button", "Send", "button"),
+        ),
+        "Fill this form and submit it",
+        {
+            "name": "Aryan",
+            "phone": "0637859636",
+            "whatsapp number": "0637859636",
+            "line id": "aryan",
+        },
+        12,
+        False,
+    )
+
+    by_id = {action.action_id: action for action in result}
+    assert "fill_e1_name" in by_id
+    assert "fill_e2_phone" in by_id
+    assert "fill_e3_whatsapp number" in by_id
+    assert "fill_e4_line id" in by_id
+    assert "click_e5" not in by_id
+    assert all(action.goal_match for action in result if action.kind.value == "fill")
+
+
+def test_requested_native_option_is_selected_and_submit_waits():
+    result = build_actions(
+        snapshot(
+            ObservedElement(
+                "e1",
+                "combobox",
+                "Rent or Sell",
+                "select",
+                options=(ObservedOption("Choose", ""), ObservedOption("Rent", "rent"), ObservedOption("Sell", "sell")),
+            ),
+            ObservedElement("e2", "button", "Send", "button"),
+        ),
+        "Choose looking to rent and submit",
+        {"rent or sell": "Rent"},
+        8,
+        False,
+    )
+
+    assert [action.action_id for action in result] == ["select_e1_1"]
+    assert result[0].option == "Rent"
+
+
+def test_submit_becomes_progress_after_requested_fields_are_satisfied():
+    result = build_actions(
+        snapshot(
+            ObservedElement("e1", "textbox", "Name*", "input", value="Aryan"),
+            ObservedElement("e2", "button", "Send", "button"),
+        ),
+        "Fill this form and submit it",
+        {"name": "Aryan"},
+        8,
+        False,
+    )
+
+    assert [action.action_id for action in result] == ["click_e2"]
+    assert result[0].goal_match
+    assert "Matched terms: submit" in result[0].description
+
+
+def test_phone_widget_country_normalization_does_not_repeat_a_satisfied_fill():
+    result = build_actions(
+        snapshot(
+            ObservedElement("e1", "textbox", "Phone*", "input", value="637859636"),
+            ObservedElement("e2", "button", "Send", "button"),
+        ),
+        "Fill this form and submit it",
+        {"phone": "0637859636"},
+        8,
+        False,
+    )
+
+    assert [action.action_id for action in result] == ["click_e2"]
+
+
+def test_pending_form_values_remove_unrelated_matching_contact_links():
+    result = build_actions(
+        snapshot(
+            ObservedElement("e1", "link", "Line Chat", "a", href="https://line.me/chat"),
+            ObservedElement("e2", "textbox", "Line ID", "input"),
+        ),
+        "Fill the form with my line ID and submit",
+        {"line id": "aryan"},
+        8,
+        False,
+    )
+
+    assert [action.action_id for action in result] == ["fill_e2_line id"]
+
+
 def test_query_terms_in_destination_do_not_create_a_direct_match():
     result = build_actions(
         snapshot(
