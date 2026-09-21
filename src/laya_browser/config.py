@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,6 +28,7 @@ class RunConfig:
     prepared_inputs: dict[str, str] = field(default_factory=dict)
     success_text: str | None = None
     success_url_prefix: str | None = None
+    success_url_regex: str | None = None
     max_steps: int = 20
     max_seconds: float = 60
     max_candidates: int = 18
@@ -52,8 +54,33 @@ class RunConfig:
             success_url = urlparse(self.success_url_prefix)
             if success_url.scheme not in {"http", "https"} or not success_url.hostname:
                 raise ValueError("success_url_prefix must be an absolute HTTP(S) URL")
+        if self.success_url_regex:
+            try:
+                re.compile(self.success_url_regex)
+            except re.error as error:
+                raise ValueError("success_url_regex must be a valid regular expression") from error
+
+    def matches_success_url(self, url: str) -> bool:
+        prefix_matches = not self.success_url_prefix or url.startswith(self.success_url_prefix)
+        regex_matches = not self.success_url_regex or bool(re.search(self.success_url_regex, url))
+        return prefix_matches and regex_matches
 
     @property
     def effective_allowed_domains(self) -> frozenset[str]:
         hostname = urlparse(self.start_url).hostname
-        return frozenset({hostname, *self.allowed_domains})
+        domains = {hostname, *self.allowed_domains}
+        aliases = {
+            domain.removeprefix("www.") if domain.startswith("www.") else f"www.{domain}"
+            for domain in domains
+        }
+        return frozenset({*domains, *aliases})
+
+    @property
+    def preferred_domains(self) -> frozenset[str]:
+        """Explicit non-start domains that can advance a cross-site task."""
+        hostname = urlparse(self.start_url).hostname
+        start_aliases = {
+            hostname,
+            hostname.removeprefix("www.") if hostname.startswith("www.") else f"www.{hostname}",
+        }
+        return self.effective_allowed_domains - start_aliases

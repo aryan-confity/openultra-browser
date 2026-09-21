@@ -30,6 +30,8 @@ bounded typed actions ---> local Laya MLX ---> probabilities
 - Probability-aware fallback when the highest-ranked action is blocked or recently ineffective.
 - Deterministic success checks, bounded steps and time, and atomic JSON traces.
 - A dedicated visible Chrome profile that isolates automation from personal browser data.
+- A loopback-only visual inspector with a live timer, target overlays, probabilities, guarded
+  predict/execute controls, automatic mode, and trace export.
 
 ## Install
 
@@ -77,9 +79,29 @@ Chrome profile. The start domain is the only permitted destination by default. A
 `--allow-domain`. Sensitive or destructive actions remain blocked unless `--allow-risky` is given;
 password and file inputs are always outside this runtime's control.
 
-Supply `--success-text`, `--success-url-prefix`, or both whenever a task has an observable
-postcondition. When both are present, both must pass. Without a deterministic postcondition, a Laya
-`DONE` proposal returns `needs_verification` instead of claiming success.
+Supply `--success-text`, `--success-url-prefix`, `--success-url-regex`, or a combination whenever a
+task has an observable postcondition. Every configured check must pass. Without a deterministic
+postcondition, a Laya `DONE` proposal returns `needs_verification` instead of claiming success.
+
+## Visual Inspector
+
+Start the isolated Chrome profile, then launch the local inspector:
+
+```bash
+./scripts/launch_chrome.sh
+export BU_CDP_URL=http://127.0.0.1:9333
+laya-browser inspect
+```
+
+The inspector opens at `http://127.0.0.1:8766`. Enter a task, start URL, optional prepared text, and
+deterministic success checks. `Choose next` runs local Laya inference without mutating the page;
+`Execute choice` applies exactly that fingerprint-bound decision; `Run automatically` repeats the
+same guarded cycle. The live timer, screenshots, indexed targets, operation probabilities, ranked
+actions, policy interventions, and decision trail remain visible throughout the run.
+
+The server binds only to loopback, requires a random per-run request token and same-origin POSTs,
+sets a restrictive content-security policy, and sends no model request over the network. Prepared
+text remains executor-only and is excluded from model state and trace exports.
 
 ## Local Demo
 

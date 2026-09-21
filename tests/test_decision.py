@@ -63,7 +63,7 @@ def test_operation_and_compatible_target_share_one_local_batch():
     assert result.probabilities["click_e2"] > result.probabilities["scroll_down"]
     assert abs(sum(result.probabilities.values()) - 1) < 1e-9
     operations = fake.calls[0][1]["operation"]["criteria"]
-    assert "direct goal-matching target exists: YES" in operations["CLICK"]
+    assert "goal-progress action exists: YES" in operations["CLICK"]
     state = fake.calls[0][0]
     assert state.index("Trust boundary") < state.index("Visible page text")
     assert state.index("Recent actions") < state.index("Visible page text")

@@ -12,6 +12,7 @@ from typing import Any
 class ActionKind(StrEnum):
     CLICK = "click"
     FILL = "fill"
+    PRESS_ENTER = "press_enter"
     SELECT = "select"
     SCROLL_UP = "scroll_up"
     SCROLL_DOWN = "scroll_down"
@@ -40,6 +41,7 @@ class ObservedElement:
     checked: bool | None = None
     selected: bool | None = None
     expanded: bool | None = None
+    submit_on_enter: bool = False
     options: tuple[ObservedOption, ...] = ()
     x: float = 0
     y: float = 0
@@ -55,6 +57,17 @@ class ObservedElement:
         if self.href:
             parts.append(f"destination: {self.href}")
         return " | ".join(parts)
+
+    @property
+    def semantic_description(self) -> str:
+        parts = [self.role or self.tag, self.name or "unlabelled"]
+        if self.href:
+            parts.append(f"destination: {self.href}")
+        return " | ".join(parts)
+
+    @property
+    def goal_description(self) -> str:
+        return " | ".join((self.role or self.tag, self.name or "unlabelled"))
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,5 @@
 from laya_browser.agent import BrowserAgent
-from laya_browser.browser import ExecutionUncertain
+from laya_browser.browser import ExecutionUncertain, StalePage
 from laya_browser.config import RunConfig
 from laya_browser.models import BrowserSnapshot, ModelDecision
 
@@ -79,6 +79,27 @@ class UncertainBrowser(FakeBrowser):
         raise ExecutionUncertain("input may have executed")
 
 
+class StaleThenVerifiedBrowser(UncertainBrowser):
+    def __init__(self, url, *, text_limit):
+        super().__init__(url, text_limit=text_limit)
+        self.snapshot = BrowserSnapshot(
+            "https://example.com/start",
+            "Start",
+            "Nothing completed yet",
+            (),
+            can_go_back=True,
+        )
+
+    def act(self, *_args):
+        self.snapshot = BrowserSnapshot(
+            "https://example.com/done",
+            "Done",
+            "The requested result is visible",
+            (),
+        )
+        raise StalePage("page changed before input")
+
+
 def test_done_proposal_never_claims_unverified_success():
     result = BrowserAgent(
         RunConfig(goal="Finish", start_url="https://example.com"),
@@ -129,3 +150,20 @@ def test_uncertain_execution_stops_without_retry():
 
     assert result.status == "needs_verification"
     assert len(result.steps) == 1
+
+
+def test_pre_input_staleness_reobserves_without_marking_action_executed():
+    result = BrowserAgent(
+        RunConfig(
+            goal="Go back",
+            start_url="https://example.com",
+            success_text="requested result",
+        ),
+        decision_engine=BackEngine(),
+        browser_factory=StaleThenVerifiedBrowser,
+    ).run()
+
+    assert result.status == "completed"
+    assert len(result.steps) == 1
+    assert result.steps[0].executed_action is None
+    assert result.steps[0].action_error.startswith("StalePage:")

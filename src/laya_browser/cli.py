@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--input", action="append", default=[], metavar="NAME=VALUE")
     run.add_argument("--success-text")
     run.add_argument("--success-url-prefix")
+    run.add_argument("--success-url-regex")
     run.add_argument("--max-steps", type=int, default=20)
     run.add_argument("--max-seconds", type=float, default=60)
     run.add_argument("--max-candidates", type=int, default=18)
@@ -56,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-risky", action="store_true")
     run.add_argument("--optimize", action="store_true")
     run.add_argument("--trace", type=Path)
+    inspect = subparsers.add_parser("inspect", help="Open the local visual inspector")
+    inspect.add_argument("--port", type=int, default=8766)
+    inspect.add_argument("--model", default=default_model_path())
+    inspect.add_argument("--no-open", action="store_true")
     return parser
 
 
@@ -68,6 +73,7 @@ def _run(args: argparse.Namespace) -> int:
         prepared_inputs=_prepared_inputs(args.input),
         success_text=args.success_text,
         success_url_prefix=args.success_url_prefix,
+        success_url_regex=args.success_url_regex,
         max_steps=args.max_steps,
         max_seconds=args.max_seconds,
         max_candidates=args.max_candidates,
@@ -84,6 +90,11 @@ def _run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.command == "inspect":
+        from .inspector import run_inspector
+
+        run_inspector(port=args.port, model=args.model, open_browser=not args.no_open)
+        return
     raise SystemExit(_run(args))
 
 

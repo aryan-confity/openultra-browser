@@ -5,12 +5,13 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from .browser import Browser, ExecutionUncertain
+from .browser import Browser, ExecutionUncertain, StalePage
 from .config import RunConfig
 from .decision import LayaDecisionEngine
 from .models import ActionKind, RunResult, StepRecord
 from .observation import build_actions
 from .policy import SafetyPolicy
+from .progress import repeats_action_cycle
 from .trace import write_trace
 
 
@@ -50,10 +51,12 @@ class BrowserAgent:
                 text_verified = not self.config.success_text or (
                     self.config.success_text.casefold() in snapshot.visible_text.casefold()
                 )
-                url_verified = not self.config.success_url_prefix or snapshot.url.startswith(
-                    self.config.success_url_prefix
+                url_verified = self.config.matches_success_url(snapshot.url)
+                has_verifier = bool(
+                    self.config.success_text
+                    or self.config.success_url_prefix
+                    or self.config.success_url_regex
                 )
-                has_verifier = bool(self.config.success_text or self.config.success_url_prefix)
                 if has_verifier and text_verified and url_verified:
                     status = "completed"
                     checks = []
@@ -61,6 +64,8 @@ class BrowserAgent:
                         checks.append(f"text {self.config.success_text!r}")
                     if self.config.success_url_prefix:
                         checks.append(f"URL prefix {self.config.success_url_prefix!r}")
+                    if self.config.success_url_regex:
+                        checks.append(f"URL pattern {self.config.success_url_regex!r}")
                     reason = "Verified " + " and ".join(checks)
                     break
 
@@ -70,6 +75,9 @@ class BrowserAgent:
                     self.config.prepared_inputs,
                     self.config.max_candidates,
                     include_done=not has_verifier,
+                    success_url_prefix=self.config.success_url_prefix,
+                    success_url_regex=self.config.success_url_regex,
+                    preferred_domains=self.config.preferred_domains,
                 )
                 decision = self.engine.decide(
                     goal=self.config.goal,
@@ -121,6 +129,9 @@ class BrowserAgent:
                     browser.act(chosen, snapshot, self.config.prepared_inputs)
                     next_snapshot = browser.observe()
                     record.changed = next_snapshot.fingerprint != snapshot.fingerprint
+                except StalePage as error:
+                    record.action_error = f"{type(error).__name__}: {error}"
+                    record.executed_action = None
                 except ExecutionUncertain as error:
                     record.action_error = f"{type(error).__name__}: {error}"
                     status = "needs_verification"
@@ -138,6 +149,12 @@ class BrowserAgent:
                     status, reason = (
                         "stuck",
                         "Three consecutive actions produced no observable change",
+                    )
+                    break
+                if repeats_action_cycle(history):
+                    status, reason = (
+                        "stuck",
+                        "A repeated action sequence produced no durable task progress",
                     )
                     break
             final_url = browser.url

@@ -11,6 +11,7 @@ from .models import BrowserSnapshot, CandidateAction, ModelDecision, StepRecord
 OPERATION_BY_KIND = {
     "click": "CLICK",
     "fill": "TYPE_TEXT",
+    "press_enter": "SUBMIT",
     "select": "SELECT",
     "scroll_up": "SCROLL_UP",
     "scroll_down": "SCROLL_DOWN",
@@ -23,6 +24,7 @@ OPERATION_BY_KIND = {
 OPERATION_DESCRIPTIONS = {
     "CLICK": "Activate a visible link, button, menu item, checkbox, radio, tab, or suggestion.",
     "TYPE_TEXT": "Enter one named prepared value into a visible editable field.",
+    "SUBMIT": "Submit the current value from a visible search or go field.",
     "SELECT": "Choose one observed option in a native dropdown.",
     "SCROLL_UP": "Scroll upward to inspect earlier visible content.",
     "SCROLL_DOWN": "Scroll downward to reveal more content.",
@@ -92,7 +94,7 @@ class LayaDecisionEngine:
         for operation, candidates in grouped.items():
             description = OPERATION_DESCRIPTIONS[operation]
             if any(action.goal_match for action in candidates):
-                description += " Deterministic planner: a direct goal-matching target exists: YES."
+                description += " Deterministic planner: a goal-progress action exists: YES."
             operations[operation] = description
         recent = [
             {
@@ -121,7 +123,7 @@ class LayaDecisionEngine:
                 "criteria": operations,
             },
         }
-        for operation in ("CLICK", "TYPE_TEXT", "SELECT"):
+        for operation in ("CLICK", "TYPE_TEXT", "SUBMIT", "SELECT"):
             candidates = grouped.get(operation)
             if candidates:
                 questions[f"{operation.lower()}_target"] = {
@@ -146,7 +148,7 @@ class LayaDecisionEngine:
         selected_target_probabilities: dict[str, float] = {}
         proposed_action = ""
         for operation, candidates in grouped.items():
-            if operation in {"CLICK", "TYPE_TEXT", "SELECT"}:
+            if operation in {"CLICK", "TYPE_TEXT", "SUBMIT", "SELECT"}:
                 answer = answers[f"{operation.lower()}_target"]
                 expected = {action.action_id for action in candidates}
                 target_probabilities = _validate_answer(answer, expected)

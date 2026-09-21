@@ -17,6 +17,10 @@ class ExecutionUncertain(RuntimeError):
     """Browser input may have executed; automatic retry is unsafe."""
 
 
+class StalePage(RuntimeError):
+    """The observed page changed before browser input began."""
+
+
 VALIDATE_TARGET_SCRIPT = r"""
 ({ nodeId, expectedGuard, kind, selectLabel, selectValue }) => {
   const cache = window.__layaBrowser;
@@ -83,7 +87,14 @@ VALIDATE_TARGET_SCRIPT = r"""
   }
   return {x, y, autocomplete: kind === 'fill' &&
     (node.getAttribute('role') === 'combobox' || node.hasAttribute('aria-controls') ||
-      node.hasAttribute('aria-owns'))};
+      node.hasAttribute('aria-owns')), submitOnEnter:
+    (kind === 'fill' || kind === 'press_enter') &&
+    ['INPUT', 'TEXTAREA'].includes(node.tagName) && Boolean(node.form) && (
+      ['search', 'go'].includes(normal(node.getAttribute('enterkeyhint')).toLowerCase()) ||
+      node.type === 'search' || role === 'searchbox' ||
+      (role === 'combobox' && label.toLowerCase().includes('search')) ||
+      ['q', 'query', 'search'].includes(normal(node.getAttribute('name')).toLowerCase())
+    )};
 }
 """
 
@@ -140,6 +151,9 @@ class Browser:
                 time.sleep(0.02)
         raise RuntimeError("Browser page did not settle")
 
+    def screenshot(self) -> str:
+        return self.call("Page.captureScreenshot", format="jpeg", quality=78)["data"]
+
     def act(
         self,
         action: CandidateAction,
@@ -148,7 +162,7 @@ class Browser:
     ) -> None:
         before_url = self.url
         if before_url != snapshot.url:
-            raise RuntimeError("Page navigated after observation; refusing a stale action")
+            raise StalePage("Page navigated after observation; refusing a stale action")
         if action.kind == ActionKind.SCROLL_DOWN:
             self.call(
                 "Input.dispatchMouseEvent",
@@ -209,9 +223,9 @@ class Browser:
                 raise ExecutionUncertain(
                     "Dropdown change may have executed; inspect before retrying"
                 ) from error
-            raise
+            raise StalePage("Document changed before browser input began") from error
         if target is None:
-            raise RuntimeError("Observed target changed, became hidden, or is covered")
+            raise StalePage("Observed target changed, became hidden, or is covered")
         try:
             if action.kind == ActionKind.CLICK:
                 for event in ("mousePressed", "mouseReleased"):
@@ -235,15 +249,25 @@ class Browser:
                         commands=["selectAll"] if event == "keyDown" else [],
                     )
                 self.call("Input.insertText", text=prepared_inputs[action.input_key])
-                if element.input_type == "search":
-                    for event in ("keyDown", "keyUp"):
-                        self.call("Input.dispatchKeyEvent", type=event, key="Enter", code="Enter")
+            elif action.kind == ActionKind.PRESS_ENTER:
+                for event in ("rawKeyDown", "keyUp"):
+                    self.call(
+                        "Input.dispatchKeyEvent",
+                        type=event,
+                        key="Enter",
+                        code="Enter",
+                        windowsVirtualKeyCode=13,
+                        nativeVirtualKeyCode=13,
+                    )
             elif action.kind != ActionKind.SELECT:
                 raise ValueError(f"Unsupported action kind: {action.kind}")
             self._settle(
                 action.kind,
                 before_url=before_url,
-                expect_navigation=bool(action.target_url and action.target_url != before_url),
+                expect_navigation=bool(
+                    (action.target_url and action.target_url != before_url)
+                    or action.kind == ActionKind.PRESS_ENTER
+                ),
                 autocomplete=bool(target.get("autocomplete")),
             )
         except ExecutionUncertain:
@@ -282,6 +306,21 @@ class Browser:
                 await_promise=True,
             )
             return
+        if kind == ActionKind.PRESS_ENTER and expect_navigation and before_url:
+            navigated = self._wait_for_navigation(before_url)
+            if not navigated:
+                submitted = self.evaluate(
+                    """(() => {
+                      const field = document.activeElement;
+                      const form = field?.form;
+                      if (!form || typeof form.requestSubmit !== 'function') return false;
+                      form.requestSubmit();
+                      return true;
+                    })()"""
+                )
+                if submitted:
+                    self._wait_for_navigation(before_url)
+            return
         if expect_navigation and before_url:
             self._wait_for_navigation(before_url)
             return
@@ -293,22 +332,29 @@ class Browser:
         except RuntimeError:
             pass
 
-    def _wait_for_navigation(self, before_url: str, timeout_seconds: float = 2.0) -> None:
+    def _wait_for_navigation(self, before_url: str, timeout_seconds: float = 2.0) -> bool:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:
                 current_url = self.url
                 if current_url != before_url:
                     if self.evaluate("document.readyState") in {"interactive", "complete"}:
-                        return
+                        return True
             except RuntimeError:
                 pass
             time.sleep(0.02)
+        return False
 
     def close(self) -> None:
-        if self.target:
-            cdp("Target.closeTarget", targetId=self.target)
-            self.target = None
+        target = self.target
+        self.target = None
+        if not target:
+            return
+        try:
+            cdp("Target.closeTarget", targetId=target)
+        except RuntimeError as error:
+            if "No target with given id found" not in str(error):
+                raise
 
     def __enter__(self):
         return self

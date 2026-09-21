@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedElement, ObservedOption
 
@@ -94,9 +94,15 @@ OBSERVE_SCRIPT = r"""
       href: node.tagName === 'A' ? node.href : '',
       disabled: false,
       checked: typeof node.checked === 'boolean' ? node.checked : null,
-	      selected: node.getAttribute('aria-selected') === null ? null : node.getAttribute('aria-selected') === 'true',
-	      expanded: node.getAttribute('aria-expanded') === null ? null : node.getAttribute('aria-expanded') === 'true',
-	      options: node.tagName === 'SELECT' ? Array.from(node.options)
+      selected: node.getAttribute('aria-selected') === null ? null : node.getAttribute('aria-selected') === 'true',
+      expanded: node.getAttribute('aria-expanded') === null ? null : node.getAttribute('aria-expanded') === 'true',
+	  submit_on_enter: ['INPUT', 'TEXTAREA'].includes(node.tagName) && Boolean(node.form) && (
+	    ['search', 'go'].includes(normal(node.getAttribute('enterkeyhint')).toLowerCase()) ||
+	    node.type === 'search' || role === 'searchbox' ||
+	    (role === 'combobox' && label.toLowerCase().includes('search')) ||
+	    ['q', 'query', 'search'].includes(normal(node.getAttribute('name')).toLowerCase())
+	  ),
+	  options: node.tagName === 'SELECT' ? Array.from(node.options)
         .filter((option) => !option.selected && !option.disabled && !option.closest('optgroup[disabled]'))
         .map((option) => ({label: normal(option.text), value: String(option.value)})).slice(0, 20) : [],
       x: Math.round(rect.x), y: Math.round(rect.y),
@@ -172,15 +178,23 @@ GOAL_STOPWORDS = {
     "choose",
     "click",
     "find",
+    "for",
     "go",
+    "google",
     "navigate",
     "open",
+    "official",
     "please",
+    "properties",
+    "property",
     "select",
     "show",
+    "site",
+    "search",
     "the",
     "then",
     "to",
+    "website",
 }
 
 
@@ -189,13 +203,13 @@ def _goal_terms(value: str) -> set[str]:
 
 
 def _score(element: ObservedElement, goal: str) -> float:
-    overlap = len(_goal_terms(goal) & _tokens(element.description))
+    overlap = len(_goal_terms(goal) & _tokens(element.goal_description))
     role_bonus = 2 if element.role in {"button", "link", "searchbox", "textbox"} else 0
     return overlap * 5 + role_bonus + (1 if element.name else -2) + max(0, 1 - element.y / 2_000)
 
 
 def _goal_match(element: ObservedElement, goal: str) -> str:
-    matches = sorted(_goal_terms(goal) & _tokens(element.description))
+    matches = sorted(_goal_terms(goal) & _tokens(element.goal_description))
     if matches:
         return (
             " Direct goal match: YES. Prefer over controls with no match. "
@@ -210,37 +224,97 @@ def build_actions(
     prepared_inputs: Mapping[str, str],
     max_candidates: int,
     include_done: bool,
+    success_url_prefix: str | None = None,
+    success_url_regex: str | None = None,
+    preferred_domains: frozenset[str] = frozenset(),
 ) -> tuple[CandidateAction, ...]:
     ranked: list[tuple[float, CandidateAction]] = []
+    strong_action_ids: set[str] = set()
     for element in snapshot.elements:
-        score = _score(element, goal)
-        goal_match = bool(_goal_terms(goal) & _tokens(element.description))
+        target_url = urljoin(snapshot.url, element.href) if element.href else None
+        prefix_match = bool(
+            success_url_prefix and target_url and target_url.startswith(success_url_prefix)
+        )
+        regex_match = bool(
+            success_url_regex and target_url and re.search(success_url_regex, target_url)
+        )
+        preferred_match = bool(
+            target_url
+            and urlparse(snapshot.url).hostname not in preferred_domains
+            and urlparse(target_url).hostname in preferred_domains
+        )
+        verifier_match = prefix_match or regex_match
+        score = _score(element, goal) + (40 if verifier_match else 0) + (
+            30 if preferred_match else 0
+        )
+        label_goal_match = bool(_goal_terms(goal) & _tokens(element.goal_description))
+        goal_match = label_goal_match or verifier_match
+        verifier_fact = (
+            " Destination matches the required success URL: YES."
+            if verifier_match
+            else ""
+        )
+        preferred_fact = (
+            " Destination is an explicitly approved non-start domain: YES."
+            if preferred_match
+            else ""
+        )
         editable = element.role in {"textbox", "searchbox", "spinbutton"} or (
             element.role == "combobox" and element.tag != "select"
         )
         if editable:
             for input_key in prepared_inputs:
+                if element.value == prepared_inputs[input_key]:
+                    continue
+                prepared_goal_match = bool(
+                    _goal_terms(goal) & _tokens(prepared_inputs[input_key])
+                ) or (len(prepared_inputs) == 1 and element.submit_on_enter)
+                progress_fact = (
+                    " Prepared value directly advances the goal: YES."
+                    if prepared_goal_match
+                    else " Prepared value directly advances the goal: unknown."
+                )
                 ranked.append(
                     (
-                        score + (4 if input_key.lower() in _tokens(element.description) else 0),
+                        score
+                        + (20 if prepared_goal_match else 0)
+                        + (4 if input_key.lower() in _tokens(element.description) else 0),
                         CandidateAction(
                             f"fill_{element.element_id}_{input_key}",
                             ActionKind.FILL,
-                            f"Enter prepared '{input_key}' into {element.description}."
+                            f"Enter prepared '{input_key}' into {element.semantic_description}."
+                            + progress_fact
+                            + verifier_fact
+                            + preferred_fact
                             + _goal_match(element, goal),
                             element.element_id,
                             input_key=input_key,
-                            goal_match=goal_match,
+                            goal_match=goal_match or prepared_goal_match,
                         ),
                     )
                 )
+            if element.submit_on_enter and element.value:
+                action = CandidateAction(
+                    f"submit_{element.element_id}",
+                    ActionKind.PRESS_ENTER,
+                    f"Submit the current search from {element.semantic_description}. "
+                    "Deterministic planner: the field has a value and still needs submission: YES."
+                    + _goal_match(element, goal),
+                    element.element_id,
+                    goal_match=True,
+                )
+                ranked.append((score + 35, action))
+                strong_action_ids.add(action.action_id)
             ranked.append(
                 (
                     score - 1,
                     CandidateAction(
                         f"click_{element.element_id}",
                         ActionKind.CLICK,
-                        f"Open or focus {element.description}." + _goal_match(element, goal),
+                        f"Open or focus {element.semantic_description}."
+                        + verifier_fact
+                        + preferred_fact
+                        + _goal_match(element, goal),
                         element.element_id,
                         goal_match=goal_match,
                     ),
@@ -255,6 +329,8 @@ def build_actions(
                             f"select_{element.element_id}_{index}",
                             ActionKind.SELECT,
                             f"Select '{option.label}' in {element.description}."
+                            + verifier_fact
+                            + preferred_fact
                             + _goal_match(element, goal),
                             element.element_id,
                             option=option.label,
@@ -264,24 +340,56 @@ def build_actions(
                     )
                 )
         else:
+            action = CandidateAction(
+                f"click_{element.element_id}",
+                ActionKind.CLICK,
+                f"Activate {element.description}."
+                + verifier_fact
+                + preferred_fact
+                + _goal_match(element, goal),
+                element.element_id,
+                target_url=target_url,
+                goal_match=goal_match or preferred_match,
+            )
             ranked.append(
                 (
                     score,
-                    CandidateAction(
-                        f"click_{element.element_id}",
-                        ActionKind.CLICK,
-                        f"Activate {element.description}." + _goal_match(element, goal),
-                        element.element_id,
-                        target_url=urljoin(snapshot.url, element.href) if element.href else None,
-                        goal_match=goal_match,
-                    ),
+                    action,
                 )
             )
+            if verifier_match or preferred_match:
+                strong_action_ids.add(action.action_id)
+
+    transition_pending = bool(
+        preferred_domains and urlparse(snapshot.url).hostname not in preferred_domains
+    )
+    if strong_action_ids:
+        ranked = [(score, action) for score, action in ranked if action.action_id in strong_action_ids]
+    elif transition_pending:
+        ranked = [
+            (score, action)
+            for score, action in ranked
+            if not action.target_url
+            or urlparse(action.target_url).hostname in preferred_domains
+        ]
+    has_direct_target = any(action.goal_match for _, action in ranked)
+    if not strong_action_ids and not transition_pending and has_direct_target:
+        ranked = [(score, action) for score, action in ranked if action.goal_match]
 
     controls: list[CandidateAction] = []
     if snapshot.can_scroll_down:
         controls.append(
-            CandidateAction("scroll_down", ActionKind.SCROLL_DOWN, "Scroll down for more content")
+            CandidateAction(
+                "scroll_down",
+                ActionKind.SCROLL_DOWN,
+                (
+                    "Scroll down. Deterministic planner: no direct target is visible and "
+                    "unexplored content exists below: YES."
+                    if not has_direct_target
+                    else "Scroll down for more content"
+                ),
+                goal_match=not has_direct_target,
+            )
         )
     if snapshot.can_scroll_up:
         controls.append(
@@ -289,7 +397,7 @@ def build_actions(
         )
     if snapshot.can_go_back:
         controls.append(CandidateAction("back", ActionKind.BACK, "Return to the previous page"))
-    if not any(action.goal_match for _, action in ranked):
+    if not has_direct_target and not snapshot.can_scroll_down:
         controls.append(
             CandidateAction("wait", ActionKind.WAIT, "Wait briefly for the page to update")
         )
