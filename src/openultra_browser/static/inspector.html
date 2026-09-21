@@ -22,7 +22,7 @@
           <label for="goal">Task</label>
           <textarea id="goal" rows="6" required autofocus placeholder="Describe what you want the browser to do"></textarea>
           <button class="primary" id="start" type="submit">
-            <span>Start task</span><span aria-hidden="true">&#8594;</span>
+            <span>Start task</span>
           </button>
         </form>
 
@@ -34,9 +34,18 @@
             <span id="status">Ready for a task</span>
           </div>
           <div class="telemetry">
-            <span id="timer">00:00.000</span>
-            <span><b id="decision-ms">--</b> ms</span>
-            <span><b id="decision-rate">0.00</b> decisions/s</span>
+            <div class="metric">
+              <span class="metric-label">Elapsed</span>
+              <strong id="timer">00:00.000</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Decision</span>
+              <strong><b id="decision-ms">--</b><small>ms</small></strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Rate</span>
+              <strong><b id="decision-rate">0.00</b><small>/sec</small></strong>
+            </div>
           </div>
         </section>
 
