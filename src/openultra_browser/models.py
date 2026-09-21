@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -36,6 +37,7 @@ class ObservedElement:
     tag: str
     input_type: str = ""
     value: str = ""
+    date_value: str = ""
     href: str = ""
     disabled: bool = False
     checked: bool | None = None
@@ -58,6 +60,8 @@ class ObservedElement:
             parts.append(f"current value: {self.value}")
         if self.href:
             parts.append(f"destination: {self.href}")
+        if self.date_value:
+            parts.append(f"date: {self.date_value}")
         for name in ("checked", "pressed", "selected", "expanded", "busy"):
             value = getattr(self, name)
             if value is not None:
@@ -69,11 +73,35 @@ class ObservedElement:
         parts = [self.role or self.tag, self.name or "unlabelled"]
         if self.href:
             parts.append(f"destination: {self.href}")
+        if self.date_value:
+            parts.append(f"date: {self.date_value}")
         return " | ".join(parts)
 
     @property
     def goal_description(self) -> str:
-        return " | ".join((self.role or self.tag, self.name or "unlabelled"))
+        parts = [self.role or self.tag, self.name or "unlabelled"]
+        date_types = {"date", "datetime-local", "month", "time", "week"}
+        date_name = bool(
+            re.search(
+                r"\b(?:date|departure|depart|return|arrival|check[ -]?in|check[ -]?out)\b",
+                self.name,
+                re.IGNORECASE,
+            )
+        )
+        date_value = bool(
+            re.search(
+                r"(?:\b\d{4}-\d{2}(?:-\d{2})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|"
+                r"apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|"
+                r"nov(?:ember)?|dec(?:ember)?)\b)",
+                self.value,
+                re.IGNORECASE,
+            )
+        )
+        if self.value and (self.input_type in date_types or (date_name and date_value)):
+            parts.append(f"current date: {self.value}")
+        if self.date_value:
+            parts.append(f"date: {self.date_value}")
+        return " | ".join(parts)
 
 
 @dataclass(frozen=True)

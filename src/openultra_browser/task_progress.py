@@ -12,7 +12,8 @@ from .models import ActionKind, BrowserSnapshot, CandidateAction, ModelDecision,
 ACTION_VERBS = (
     r"go|open|click|select|choose|find|get|visit|navigate|search|show|read|view|fill|"
     r"submit|enter|type|press|pick|like|dislike|follow|unfollow|play|pause|save|"
-    r"download|upload|send|share|add|remove|create|delete|inquire|sign\s+in|log\s+in"
+    r"download|upload|send|share|add|remove|create|delete|change|update|set|inquire|"
+    r"sign\s+in|log\s+in"
 )
 STEP_BOUNDARY = re.compile(
     r"(?:\s*[,;]\s*|\s+(?:and\s+then|then|and)\s+)"
@@ -141,11 +142,28 @@ def step_completion_disposition(
     if not progress.current_step:
         return "pending"
     has_current_step_action = len(history) > progress.history_boundary
+    latest_supports_step = False
     if has_current_step_action:
         latest = history[-1]
+        if "visible calendar range" in latest.description:
+            return "pending"
+        generic = {
+            "a", "an", "and", "change", "choose", "click", "enter", "go", "in",
+            "it", "navigate", "of", "on", "open", "press", "select", "set", "the",
+            "then", "to", "update", "visit",
+        }
+        step_terms = {
+            token
+            for token in re.findall(r"[a-z0-9]+", progress.current_step.casefold())
+            if len(token) > 1 and token not in generic
+        }
+        evidence = " ".join((latest.description, latest.change_summary or "")).casefold()
+        evidence_terms = set(re.findall(r"[a-z0-9]+", evidence))
+        latest_supports_step = not step_terms or bool(step_terms & evidence_terms)
         if (
             latest.action_kind == ActionKind.CLICK.value
             and latest.changed
+            and latest_supports_step
             and latest.change_summary
             and "URL changed:" in latest.change_summary
             and re.match(
@@ -166,11 +184,13 @@ def step_completion_disposition(
     ):
         return "pending"
     threshold = 0.85 if has_current_step_action else 0.9
-    if probability >= threshold:
+    if probability >= threshold and latest_supports_step:
         return "verified"
     if not has_current_step_action or probability < 0.5:
         return "pending"
     latest = history[-1]
+    if not latest_supports_step:
+        return "pending"
     if (
         latest.changed
         and latest.action_kind in {"click", "fill", "press_enter", "select"}

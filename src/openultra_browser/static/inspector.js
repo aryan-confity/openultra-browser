@@ -7,6 +7,10 @@ let automatic = false;
 let timerBase = 0;
 let timerSyncedAt = performance.now();
 let frameRequestInFlight = false;
+let inputMode = "text";
+let recognition = null;
+let voiceListening = false;
+let voiceGeneration = 0;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -60,15 +64,106 @@ async function call(name, body = {}) {
 function setControls() {
   const active = state?.page && !terminal.has(state.status);
   const hasPage = Boolean(state?.page);
-  byId("start").disabled = busy;
+  byId("start").disabled = busy || voiceListening;
   byId("start").className = hasPage ? "secondary" : "primary";
   byId("continue-task").hidden = !hasPage;
-  byId("continue-task").disabled = busy || !hasPage;
+  byId("continue-task").disabled = busy || voiceListening || !hasPage;
   byId("goal").disabled = busy;
+  byId("text-mode").disabled = busy || voiceListening;
+  byId("voice-mode").disabled = busy || voiceListening;
   byId("run").disabled = busy || !active || automatic;
   byId("run").hidden = automatic;
   byId("stop").hidden = !automatic;
   byId("loading").hidden = !(busy && !state?.page);
+}
+
+function renderInputMode() {
+  const voice = inputMode === "voice";
+  byId("text-mode").classList.toggle("active", !voice);
+  byId("voice-mode").classList.toggle("active", voice);
+  byId("text-mode").setAttribute("aria-pressed", String(!voice));
+  byId("voice-mode").setAttribute("aria-pressed", String(voice));
+  byId("voice-state").hidden = !voice;
+  byId("goal").placeholder = voice
+    ? "Your final spoken task appears here"
+    : "Describe what you want the browser to do";
+  byId("goal").required = !voice;
+  byId("start").textContent = voice ? "Speak new task" : "Start new task";
+  byId("continue-task").textContent = voice
+    ? "Speak and continue"
+    : "Continue from current page";
+  setControls();
+}
+
+function stopVoice({ cancelled = false } = {}) {
+  voiceListening = false;
+  try { recognition?.stop(); } catch { /* The recognizer may already be stopped. */ }
+  recognition = null;
+  byId("cancel-voice").hidden = true;
+  byId("voice-state").classList.remove("listening");
+  byId("voice-label").textContent = cancelled ? "Listening cancelled" : "Ready to listen";
+  setControls();
+}
+
+function listenForTask(command) {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    byId("error").textContent = "Voice input requires a browser with the Web Speech API.";
+    byId("error").hidden = false;
+    return;
+  }
+  stopVoice();
+  const generation = ++voiceGeneration;
+  const nextRecognition = new SpeechRecognition();
+  recognition = nextRecognition;
+  voiceListening = true;
+  nextRecognition.continuous = false;
+  nextRecognition.interimResults = true;
+  nextRecognition.lang = "en-US";
+  nextRecognition.maxAlternatives = 1;
+  byId("error").hidden = true;
+  byId("voice-state").classList.add("listening");
+  byId("voice-label").textContent = "Listening";
+  byId("cancel-voice").hidden = false;
+  setControls();
+
+  nextRecognition.onresult = (event) => {
+    if (generation !== voiceGeneration) return;
+    const transcript = Array.from(event.results)
+      .map((result) => result[0]?.transcript || "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (transcript) byId("goal").value = transcript;
+    const final = Array.from(event.results).every((result) => result.isFinal);
+    byId("voice-label").textContent = final ? "Task captured" : "Listening";
+    if (final && transcript) {
+      voiceListening = false;
+      recognition = null;
+      byId("cancel-voice").hidden = true;
+      byId("voice-state").classList.remove("listening");
+      queueMicrotask(() => startTask(command));
+    }
+  };
+  nextRecognition.onerror = (event) => {
+    if (generation !== voiceGeneration) return;
+    stopVoice();
+    byId("error").textContent = `Voice input failed: ${event.error || "unknown error"}`;
+    byId("error").hidden = false;
+  };
+  nextRecognition.onend = () => {
+    if (generation !== voiceGeneration || !voiceListening) return;
+    stopVoice();
+    byId("voice-label").textContent = byId("goal").value.trim()
+      ? "Task captured. Try again to run it."
+      : "No speech captured";
+  };
+  nextRecognition.start();
+}
+
+function requestTask(command) {
+  if (inputMode === "voice") listenForTask(command);
+  else startTask(command);
 }
 
 function render() {
@@ -181,10 +276,24 @@ async function startTask(command = "reset") {
 
 byId("task-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  startTask("reset");
+  requestTask("reset");
 });
 
-byId("continue-task").addEventListener("click", () => startTask("retask"));
+byId("continue-task").addEventListener("click", () => requestTask("retask"));
+byId("text-mode").addEventListener("click", () => {
+  if (voiceListening) stopVoice({ cancelled: true });
+  inputMode = "text";
+  renderInputMode();
+  byId("goal").focus();
+});
+byId("voice-mode").addEventListener("click", () => {
+  inputMode = "voice";
+  renderInputMode();
+});
+byId("cancel-voice").addEventListener("click", () => {
+  voiceGeneration += 1;
+  stopVoice({ cancelled: true });
+});
 
 byId("run").addEventListener("click", () => {
   if (!busy && state?.page && !terminal.has(state.status)) {
@@ -208,6 +317,8 @@ fetch("/api/state").then((response) => response.json()).then((value) => {
   syncTimer();
   render();
 }).catch(() => { byId("status").textContent = "Local service unavailable"; });
+
+renderInputMode();
 
 async function refreshFrame() {
   if (frameRequestInFlight || !state?.page || document.hidden) return;

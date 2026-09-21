@@ -37,8 +37,10 @@ the new run's limits. Prepared values are excluded from this context.
 ## Observation
 
 One browser evaluation stamps visible interactive nodes with ephemeral IDs and returns their role,
-accessible name, value metadata, destination, state, select options, and viewport geometry. Hidden and
-offscreen controls are excluded. Every observation receives a content fingerprint.
+accessible name, value metadata, destination, state, select options, and viewport geometry. It
+observes semantic controls plus explicit event handlers, focusable surfaces, and labelled leaf
+pointer targets. Covered, oversized, hidden, offscreen, and duplicate containers are excluded.
+Every observation receives a content fingerprint.
 
 The candidate builder scores goal/element token overlap and keeps a bounded set that fits the model's
 context. Global back, scroll, and wait actions remain available. Text actions refer to named prepared
@@ -56,6 +58,10 @@ When a visible candidate directly matches the goal or verifier, unrelated elemen
 from that decision cycle. Scroll/back controls remain available for recovery and exploration.
 If no direct target is visible while unexplored content exists below, scrolling receives an explicit
 progress fact and waiting is removed for that cycle.
+Date controls expose only date-shaped current values to goal matching. Calendar cells retain their
+ISO date, allowing deterministic Previous/Next navigation and exact-date selection while preserving
+fresh-target validation. Calendar animation settling waits for the visible ISO range to change, and
+recovers the viewport if the site scrolls an open date grid offscreen.
 Explicit non-start domains act as transition constraints: while the browser remains on the start
 domain, a visible link to an approved destination outranks same-site distractions. If that
 destination is not visible yet, the runtime explores the current page instead of following a
@@ -97,6 +103,12 @@ text. Its fixed-height app shell keeps a compact task rail beside the live brows
 begins bounded automatic execution; the rail exposes pause/resume, elapsed time, latest decision
 latency, decisions per second, current action, and recent history without exposing internal
 constraints or probability panels.
+
+The task input can use text or the browser's Web Speech API. Voice recognition is an input adapter,
+not a second agent: only a final utterance is submitted, and it enters the same reset or continue
+contract, task decomposition, policy, execution, and verification path as typed text. Audio is not
+sent to the OpenUltra server. Browser speech-recognition availability and processing behavior are
+controlled by the browser implementation.
 
 A read-only frame endpoint captures browser pixels independently from DOM observation. It uses the
 same nonblocking browser lock as commands, so preview refreshes cannot race prediction or input.

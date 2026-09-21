@@ -165,6 +165,158 @@ def test_observer_marks_form_associated_search_textareas_as_submittable():
     assert "(role === 'combobox' && label.toLowerCase().includes('search'))" in OBSERVE_SCRIPT
 
 
+def test_observer_includes_broad_interactive_surfaces_and_rejects_covered_targets():
+    assert "[onclick]" in OBSERVE_SCRIPT
+    assert "[tabindex]:not([tabindex=\"-1\"])" in OBSERVE_SCRIPT
+    assert "getComputedStyle(node).cursor !== 'pointer'" in OBSERVE_SCRIPT
+    assert "!node.contains(top)" in OBSERVE_SCRIPT
+
+
+def test_date_control_value_is_available_only_to_goal_matching():
+    departure = ObservedElement(
+        "e1",
+        "textbox",
+        "Departure",
+        "input",
+        input_type="text",
+        value="Thu, Jan 28",
+    )
+    secret = ObservedElement(
+        "e2",
+        "textbox",
+        "Account number",
+        "input",
+        input_type="text",
+        value="99887766",
+    )
+
+    assert "Thu, Jan 28" in departure.goal_description
+    assert "99887766" not in secret.goal_description
+    result = build_actions(snapshot(departure, secret), "Click Thu, Jan 28", {}, 8, False)
+    assert result[0].element_id == "e1"
+    assert result[0].goal_match
+    assert "Thu, Jan 28" not in result[0].description
+
+
+def test_complete_semantic_match_prunes_weaker_partial_matches():
+    current = snapshot(
+        ObservedElement(
+            "departure",
+            "textbox",
+            "Departure",
+            "input",
+            value="Thu, Jan 28",
+        ),
+        ObservedElement(
+            "flight",
+            "button",
+            "Flight details for Thursday January 28",
+            "button",
+        ),
+    )
+
+    result = build_actions(current, "Click Thu Jan 28", {}, 12, False)
+
+    assert [action.element_id for action in result] == ["departure"]
+
+
+def test_calendar_planner_navigates_toward_an_offscreen_requested_date():
+    current = snapshot(
+        ObservedElement(
+            "december",
+            "button",
+            "Monday, December 28, 2026",
+            "div",
+            date_value="2026-12-28",
+        ),
+        ObservedElement(
+            "january",
+            "button",
+            "Thursday, January 28, 2027",
+            "div",
+            date_value="2027-01-28",
+        ),
+        ObservedElement("previous", "button", "Previous", "button"),
+        ObservedElement("next", "button", "Next", "button"),
+    )
+
+    result = build_actions(current, "change the date to September 28th", {}, 12, False)
+
+    assert [action.element_id for action in result] == ["previous"]
+    assert "2026-09-28 is previous" in result[0].description
+
+
+def test_calendar_planner_selects_the_exact_visible_date():
+    current = snapshot(
+        ObservedElement(
+            "target",
+            "button",
+            "Monday, September 28, 2026",
+            "div",
+            date_value="2026-09-28",
+        ),
+        ObservedElement(
+            "other",
+            "button",
+            "Wednesday, October 28, 2026",
+            "div",
+            date_value="2026-10-28",
+        ),
+        ObservedElement("previous", "button", "Previous", "button"),
+    )
+
+    result = build_actions(current, "change the date to September 28th", {}, 12, False)
+
+    assert [action.element_id for action in result] == ["target"]
+    assert "Exact requested calendar date 2026-09-28" in result[0].description
+
+
+def test_calendar_transition_waits_instead_of_scrolling_or_confirming():
+    current = BrowserSnapshot(
+        "https://example.com/flights",
+        "Flights",
+        "Calendar is moving",
+        (
+            ObservedElement(
+                "done",
+                "button",
+                "Done. Search for round trip flights",
+                "button",
+            ),
+        ),
+        can_scroll_down=True,
+        can_go_back=True,
+    )
+
+    result = build_actions(current, "change the date to September 28th", {}, 12, False)
+
+    assert [action.action_id for action in result] == ["wait"]
+    assert result[0].goal_match
+
+
+def test_offscreen_open_calendar_recovers_the_viewport_before_waiting():
+    current = BrowserSnapshot(
+        "https://example.com/flights",
+        "Flights",
+        "Calendar is above the viewport",
+        (
+            ObservedElement(
+                "done",
+                "button",
+                "Done. Search for round trip flights",
+                "button",
+            ),
+        ),
+        can_scroll_up=True,
+        can_scroll_down=True,
+    )
+
+    result = build_actions(current, "change the date to September 28th", {}, 12, False)
+
+    assert [action.action_id for action in result] == ["scroll_up"]
+    assert result[0].goal_match
+
+
 def test_single_prepared_value_is_deterministic_progress_for_search_field():
     result = build_actions(
         snapshot(

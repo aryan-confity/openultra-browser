@@ -58,6 +58,15 @@ def test_stateful_action_is_its_own_atomic_step():
     )
 
 
+def test_date_open_and_date_change_are_separate_atomic_outcomes():
+    assert split_task_steps(
+        "Click on Thu, Jan 28 and change the date to September 28th"
+    ) == (
+        "Click on Thu, Jan 28",
+        "change the date to September 28th",
+    )
+
+
 def test_visible_start_destination_advances_without_model_inference():
     progress = TaskProgress.from_goal(
         "Go to wdxproperties.com and click Condos for rent"
@@ -177,10 +186,32 @@ def test_navigation_does_not_claim_a_stateful_dislike_step_completed():
 
 def test_semantic_change_with_mid_confidence_requests_focused_confirmation():
     progress = TaskProgress(("Click Inquire",), history_boundary=0)
+    matching = record("click")
+    matching.description = "Activate button Inquire"
 
-    disposition = step_completion_disposition(progress, decision(0.7), (record("click"),))
+    disposition = step_completion_disposition(progress, decision(0.7), (matching,))
 
     assert disposition == "confirm"
+
+
+def test_unrelated_changed_control_cannot_complete_a_step_at_high_confidence():
+    progress = TaskProgress(("Click Thu Jan 28",), history_boundary=0)
+    wrong = record("click")
+    wrong.description = "Activate button Sorted by top flights, Change sort order"
+    wrong.change_summary = "Changed controls: Change sort order expanded=False->True"
+
+    assert step_completion_disposition(progress, decision(0.99), (wrong,)) == "pending"
+
+
+def test_calendar_navigation_cannot_complete_before_exact_date_selection():
+    progress = TaskProgress(("change the date to September 28th",), history_boundary=0)
+    navigation = record("click")
+    navigation.description = (
+        "Activate button Previous. Requested date 2026-09-28 is previous of the "
+        "visible calendar range 2027-01-01 to 2027-02-28: YES."
+    )
+
+    assert step_completion_disposition(progress, decision(0.99), (navigation,)) == "pending"
 
 
 def test_optional_login_does_not_block_a_direct_semantic_action():

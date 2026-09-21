@@ -19,8 +19,18 @@
         </header>
 
         <form id="task-form">
-          <label for="goal">Task</label>
+          <div class="task-heading">
+            <label for="goal">Task</label>
+            <div class="input-mode" role="group" aria-label="Task input mode">
+              <button id="text-mode" class="active" type="button" aria-pressed="true">Text</button>
+              <button id="voice-mode" type="button" aria-pressed="false">Voice</button>
+            </div>
+          </div>
           <textarea id="goal" rows="6" required autofocus placeholder="Describe what you want the browser to do"></textarea>
+          <div class="voice-state" id="voice-state" hidden aria-live="polite">
+            <span><i></i><b id="voice-label">Ready to listen</b></span>
+            <button id="cancel-voice" type="button" hidden>Cancel</button>
+          </div>
           <div class="task-actions">
             <button class="primary" id="continue-task" type="button" hidden>Continue from current page</button>
             <button class="primary" id="start" type="submit">Start new task</button>

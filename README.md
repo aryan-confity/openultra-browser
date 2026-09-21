@@ -25,6 +25,8 @@ bounded typed actions ---> local MLX model ---> probabilities
 - Local MLX inference on Apple Silicon; no remote model calls.
 - One local batched call per step for the operation and every compatible target head.
 - Dynamic operation and target heads built only from currently visible, indexed DOM nodes.
+- Broad semantic observation covers native controls, explicit handlers, focusable surfaces, and
+  leaf pointer targets while rejecting covered, oversized, hidden, and duplicate containers.
 - Stale-target, cross-domain, password, upload, financial, and destructive-action guards.
 - Named prepared values for text fields; values are not placed in the model prompt.
 - Probability-aware fallback when the highest-ranked action is blocked or recently ineffective.
@@ -102,7 +104,9 @@ requests such as `search for ...`, or starts a web search for an otherwise gener
 invents text. Submitting the task starts the guarded run immediately. The fixed-height workspace
 keeps the prompt, pause/resume control, elapsed clock, latest decision time, decision rate, compact
 activity trail, and continuously refreshed browser preview visible together without dashboard
-panels or advanced run-constraint fields.
+panels or advanced run-constraint fields. Text and voice modes share the same guarded task engine.
+Voice mode uses the browser's Web Speech API, waits for a final transcript, and then starts either a
+new task or a continuation from the current page; partial speech never executes browser input.
 
 Task-first inspector runs may follow observed HTTP(S) links across sites because their eventual
 destination is not known before the task starts. Password and file inputs, non-HTTP destinations,

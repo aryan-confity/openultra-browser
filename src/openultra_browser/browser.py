@@ -50,7 +50,7 @@ VALIDATE_TARGET_SCRIPT = r"""
       item.getAttribute?.('placeholder'));
   };
   const roles = ['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio',
-    'option','gridcell','combobox','textbox','searchbox','spinbutton'];
+    'option','gridcell','combobox','textbox','searchbox','spinbutton','slider'];
   const explicit = node.getAttribute('role');
   let role = roles.includes(explicit) ? explicit : null;
   if (!role && (node.tagName === 'BUTTON' || node.tagName === 'SUMMARY')) role = 'button';
@@ -62,12 +62,20 @@ VALIDATE_TARGET_SCRIPT = r"""
     else if (['button', 'submit', 'reset', 'image'].includes(node.type)) role = 'button';
     else if (node.type === 'search') role = 'searchbox';
     else if (node.type === 'number') role = 'spinbutton';
-    else if (['text', 'email', 'url', 'tel', ''].includes(node.type)) role = 'textbox';
+    else if (node.type === 'range') role = 'slider';
+    else if (node.type === 'color') role = 'button';
+    else if (['text', 'email', 'url', 'tel', 'date', 'datetime-local', 'month', 'time',
+              'week', ''].includes(node.type)) role = 'textbox';
   }
+  if (!role && node.matches('[onclick],[oncontextmenu],[ondblclick],[draggable="true"],'+
+      '[tabindex]:not([tabindex="-1"])')) role = 'clickable';
+  if (!role && getComputedStyle(node).cursor === 'pointer') role = 'clickable';
   const label = name(node).slice(0, 140) || role;
   const scope = node.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || node.parentElement;
   const guard = JSON.stringify([
-    nodeId, role, label, node.value ?? null, node.checked ?? null, node.selectedIndex ?? null,
+    nodeId, role, label, node.value ?? null,
+    node.closest('[data-iso]')?.getAttribute('data-iso') ?? null,
+    node.checked ?? null, node.selectedIndex ?? null,
     node.readOnly ?? null, node.matches(':disabled'), node.getAttribute('aria-disabled'),
     node.getAttribute('aria-expanded'), node.getAttribute('aria-checked'),
     node.getAttribute('aria-pressed'), node.getAttribute('aria-selected'),
@@ -146,7 +154,9 @@ SEMANTIC_SETTLE_SCRIPT = r"""
     ));
     const controls = Array.from(document.querySelectorAll(
       'a[href],button,input,textarea,select,[role="button"],[role="link"],'+
-      '[role="textbox"],[role="searchbox"],[role="combobox"],[role="option"]'
+      '[role="textbox"],[role="searchbox"],[role="combobox"],[role="option"],'+
+      '[onclick],[oncontextmenu],[ondblclick],[draggable="true"],'+
+      '[tabindex]:not([tabindex="-1"])'
     )).filter((node) => node.isConnected && !node.closest('[aria-hidden="true"],[inert]'));
     const tail = controls.slice(-20).map((node) => [
       node.tagName, node.getAttribute('role'), node.getAttribute('aria-busy'),
@@ -318,6 +328,15 @@ class Browser:
         if target is None:
             raise StalePage("Observed target changed, became hidden, or is covered")
         try:
+            calendar_dates = sorted(
+                item.date_value for item in snapshot.elements if item.date_value
+            )
+            calendar_range = (
+                (calendar_dates[0], calendar_dates[-1])
+                if element.name.strip().casefold() in {"previous", "next"}
+                and calendar_dates
+                else None
+            )
             if action.kind == ActionKind.CLICK:
                 for event in ("mousePressed", "mouseReleased"):
                     self.call(
@@ -361,6 +380,7 @@ class Browser:
                 ),
                 autocomplete=bool(target.get("autocomplete")),
                 submission_started_at=submission_started_at,
+                calendar_range=calendar_range,
             )
         except ExecutionUncertain:
             raise
@@ -377,6 +397,7 @@ class Browser:
         expect_navigation: bool = False,
         autocomplete: bool = False,
         submission_started_at: float | None = None,
+        calendar_range: tuple[str, str] | None = None,
     ) -> bool:
         if kind == ActionKind.FILL:
             self.evaluate(
@@ -434,6 +455,33 @@ class Browser:
                     f"with {status} evidence"
                 )
             return bool(outcome and outcome.get("verified"))
+        if calendar_range:
+            self.evaluate(
+                f"""new Promise((resolve) => {{
+                  const before = {json.dumps(list(calendar_range))};
+                  const deadline = performance.now() + 2500;
+                  let stableFrames = 0;
+                  const check = () => {{
+                    const values = Array.from(document.querySelectorAll('[data-iso]'))
+                      .filter((node) => {{
+                        if (node.getAttribute('aria-hidden') === 'true' ||
+                            !node.checkVisibility({{checkOpacity:true, checkVisibilityCSS:true}})) return false;
+                        const rect = node.getBoundingClientRect();
+                        const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+                        return rect.width && rect.height && x >= 0 && y >= 0 &&
+                          x < innerWidth && y < innerHeight;
+                      }})
+                      .map((node) => node.getAttribute('data-iso')).filter(Boolean).sort();
+                    const changed = values.length &&
+                      (values[0] !== before[0] || values[values.length - 1] !== before[1]);
+                    stableFrames = changed ? stableFrames + 1 : 0;
+                    if (stableFrames >= 2 || performance.now() >= deadline) resolve();
+                    else requestAnimationFrame(check);
+                  }};
+                  requestAnimationFrame(check);
+                }})""",
+                await_promise=True,
+            )
         try:
             self._wait_for_semantic_quiet()
         except RuntimeError:

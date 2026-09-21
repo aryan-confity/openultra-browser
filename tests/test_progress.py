@@ -27,3 +27,11 @@ def test_nonrepeating_progress_is_not_stopped():
     history = [step(index + 1, action) for index, action in enumerate(["fill", "search", "site"])]
 
     assert not repeats_action_cycle(history)
+
+
+def test_repeated_controls_with_different_semantic_results_are_progress():
+    history = [step(index + 1, action) for index, action in enumerate(["previous", "up"] * 3)]
+    for index, row in enumerate(history):
+        row.change_summary = f"Visible calendar range moved to month {index}"
+
+    assert not repeats_action_cycle(history)

@@ -13,7 +13,11 @@ def repeats_action_cycle(
     repetitions: int = 3,
     max_cycle_length: int = 3,
 ) -> bool:
-    actions = [row.executed_action for row in history if row.executed_action]
+    actions = [
+        (row.executed_action, row.change_summary or "")
+        for row in history
+        if row.executed_action
+    ]
     for length in range(1, min(max_cycle_length, len(actions) // repetitions) + 1):
         tail = actions[-length * repetitions :]
         block = tail[:length]

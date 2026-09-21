@@ -40,9 +40,13 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert "requestAnimationFrame(() => requestAnimationFrame(resolve))" in script
     assert 'id="continue-task"' in html
     assert 'await call(command' in script
-    assert 'startTask("retask")' in script
+    assert 'requestTask("retask")' in script
     assert "await runAutomatically()" in script
     assert "payload.run_id = state.run_id" in script
+    assert 'id="voice-mode"' in html
+    assert 'id="cancel-voice"' in html
+    assert "window.SpeechRecognition || window.webkitSpeechRecognition" in script
+    assert "queueMicrotask(() => startTask(command))" in script
 
 
 def test_inspector_static_assets_are_packaged_below_the_module():

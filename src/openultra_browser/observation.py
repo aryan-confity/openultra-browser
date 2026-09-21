@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import date, timedelta
 from urllib.parse import parse_qsl, urljoin, urlparse
 
 from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedElement, ObservedOption
@@ -43,8 +44,11 @@ OBSERVE_SCRIPT = r"""
       node.getAttribute?.('placeholder'));
   };
   const roles = ['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio',
-    'option','gridcell','combobox','textbox','searchbox','spinbutton'];
+    'option','gridcell','combobox','textbox','searchbox','spinbutton','slider'];
   const selector = 'a[href],button,input,textarea,select,summary,[contenteditable="true"],'+
+    roles.map((role) => `[role="${role}"]`).join(',')+
+    ',[onclick],[oncontextmenu],[ondblclick],[draggable="true"],[tabindex]:not([tabindex="-1"])';
+  const semanticSelector = 'a[href],button,input,textarea,select,summary,[contenteditable="true"],'+
     roles.map((role) => `[role="${role}"]`).join(',');
   const implicitRole = (node) => {
     const explicit = node.getAttribute('role');
@@ -58,14 +62,24 @@ OBSERVE_SCRIPT = r"""
       if (['button', 'submit', 'reset', 'image'].includes(node.type)) return 'button';
       if (node.type === 'search') return 'searchbox';
       if (node.type === 'number') return 'spinbutton';
-      if (['text', 'email', 'url', 'tel', ''].includes(node.type)) return 'textbox';
+      if (node.type === 'range') return 'slider';
+      if (node.type === 'color') return 'button';
+      if (['text', 'email', 'url', 'tel', 'date', 'datetime-local', 'month', 'time',
+           'week', ''].includes(node.type)) return 'textbox';
     }
+    if (node.matches('[onclick],[oncontextmenu],[ondblclick],[draggable="true"],'+
+        '[tabindex]:not([tabindex="-1"])')) return 'clickable';
+    const cursor = getComputedStyle(node).cursor;
+    if (cursor === 'pointer' && getComputedStyle(node.parentElement || document.body).cursor !== 'pointer' &&
+        !node.closest(semanticSelector)) return 'clickable';
     return null;
   };
   const guard = (node, nodeId, role, label) => {
     const scope = node.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || node.parentElement;
     return JSON.stringify([
-      nodeId, role, label, node.value ?? null, node.checked ?? null, node.selectedIndex ?? null,
+      nodeId, role, label, node.value ?? null,
+      node.closest('[data-iso]')?.getAttribute('data-iso') ?? null,
+      node.checked ?? null, node.selectedIndex ?? null,
       node.readOnly ?? null, node.matches(':disabled'), node.getAttribute('aria-disabled'),
       node.getAttribute('aria-expanded'), node.getAttribute('aria-checked'),
       node.getAttribute('aria-pressed'), node.getAttribute('aria-selected'),
@@ -74,18 +88,32 @@ OBSERVE_SCRIPT = r"""
     ]);
   };
 
+  const candidates = Array.from(document.querySelectorAll(selector));
+  const seenCandidates = new Set(candidates);
+  for (const node of document.querySelectorAll('body *')) {
+    if (seenCandidates.has(node) || getComputedStyle(node).cursor !== 'pointer' ||
+        getComputedStyle(node.parentElement || document.body).cursor === 'pointer' ||
+        node.closest(semanticSelector)) continue;
+    seenCandidates.add(node);
+    candidates.push(node);
+  }
+
   const elements = [];
-  for (const node of document.querySelectorAll(selector)) {
+  for (const node of candidates) {
     if (elements.length >= 500 || !safe(node) || !visible(node) || node.matches(':disabled') ||
         node.closest('[aria-disabled="true"]')) continue;
     const rect = node.getBoundingClientRect();
     const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
     if (!rect.width || !rect.height || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+    const top = document.elementFromPoint(x, y);
+    if (!top || !node.contains(top)) continue;
     const role = implicitRole(node);
     if (!role || (role === 'gridcell' && node.querySelector('button,[role="button"]'))) continue;
+    if (role === 'clickable' && node.querySelector(semanticSelector)) continue;
     const nodeId = identity(node);
     const elementId = `e${nodeId}`;
     const label = name(node).slice(0, 140) || role;
+    if (role === 'clickable' && (label === role || rect.width * rect.height > innerWidth * innerHeight * 0.5)) continue;
     node.setAttribute('data-openultra-browser-id', elementId);
     elements.push({
       element_id: elementId,
@@ -94,6 +122,7 @@ OBSERVE_SCRIPT = r"""
       tag: node.tagName.toLowerCase(),
       input_type: normal(node.getAttribute('type')).toLowerCase(),
       value: 'value' in node ? normal(String(node.value)).slice(0, 100) : '',
+      date_value: normal(node.closest('[data-iso]')?.getAttribute('data-iso')).slice(0, 20),
       href: node.tagName === 'A' ? node.href : '',
       disabled: false,
       checked: typeof node.checked === 'boolean' ? node.checked : null,
@@ -185,7 +214,9 @@ GOAL_STOPWORDS = {
     "an",
     "and",
     "choose",
+    "change",
     "click",
+    "date",
     "find",
     "for",
     "from",
@@ -212,6 +243,7 @@ GOAL_STOPWORDS = {
     "properties",
     "property",
     "select",
+    "set",
     "show",
     "site",
     "search",
@@ -219,6 +251,7 @@ GOAL_STOPWORDS = {
     "then",
     "to",
     "with",
+    "update",
     "website",
 }
 
@@ -294,6 +327,76 @@ def _url_has_submitted_value(url: str, value: str) -> bool:
     return any(" ".join(candidate.casefold().split()) == expected for candidate in candidates)
 
 
+MONTHS = {
+    name: index
+    for index, names in enumerate(
+        (
+            ("january", "jan"),
+            ("february", "feb"),
+            ("march", "mar"),
+            ("april", "apr"),
+            ("may",),
+            ("june", "jun"),
+            ("july", "jul"),
+            ("august", "aug"),
+            ("september", "sep", "sept"),
+            ("october", "oct"),
+            ("november", "nov"),
+            ("december", "dec"),
+        ),
+        start=1,
+    )
+    for name in names
+}
+
+
+def _requested_calendar_date(goal: str, observed: list[date]) -> date | None:
+    iso = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", goal)
+    if iso:
+        try:
+            return date(*(int(value) for value in iso.groups()))
+        except ValueError:
+            return None
+    month_names = "|".join(sorted(MONTHS, key=len, reverse=True))
+    match = re.search(
+        rf"\b({month_names})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:[ ,]+(\d{{4}}))?\b",
+        goal,
+        re.IGNORECASE,
+    )
+    if not match or not observed:
+        return None
+    month = MONTHS[match.group(1).casefold()]
+    day = int(match.group(2))
+    years = [int(match.group(3))] if match.group(3) else range(
+        min(item.year for item in observed) - 1,
+        max(item.year for item in observed) + 2,
+    )
+    candidates: list[date] = []
+    for year in years:
+        try:
+            candidates.append(date(year, month, day))
+        except ValueError:
+            continue
+    if not candidates:
+        return None
+    first, last = min(observed), max(observed)
+    midpoint = first + timedelta(days=(last - first).days // 2)
+    return min(candidates, key=lambda item: abs((item - midpoint).days))
+
+
+def _has_calendar_request(goal: str) -> bool:
+    if re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", goal):
+        return True
+    month_names = "|".join(sorted(MONTHS, key=len, reverse=True))
+    return bool(
+        re.search(
+            rf"\b(?:{month_names})\s+\d{{1,2}}(?:st|nd|rd|th)?\b",
+            goal,
+            re.IGNORECASE,
+        )
+    )
+
+
 def build_actions(
     snapshot: BrowserSnapshot,
     goal: str,
@@ -317,6 +420,7 @@ def build_actions(
     matching_goal = goal if _goal_terms(goal) else context_goal or goal
     ranked: list[tuple[float, CandidateAction]] = []
     strong_action_ids: set[str] = set()
+    elements_by_id = {element.element_id: element for element in snapshot.elements}
     for element in snapshot.elements:
         target_url = urljoin(snapshot.url, element.href) if element.href else None
         prefix_match = bool(
@@ -463,6 +567,94 @@ def build_actions(
             if verifier_match or preferred_match:
                 strong_action_ids.add(action.action_id)
 
+    goal_terms = _goal_terms(matching_goal)
+    if len(goal_terms) >= 2:
+        complete_match_ids = {
+            element.element_id
+            for element in snapshot.elements
+            if _matched_goal_terms(element, matching_goal) == goal_terms
+        }
+        if complete_match_ids:
+            strong_action_ids.update(
+                action.action_id
+                for _, action in ranked
+                if action.element_id in complete_match_ids
+                and action.kind
+                in {ActionKind.CLICK, ActionKind.FILL, ActionKind.PRESS_ENTER, ActionKind.SELECT}
+            )
+
+    observed_dates: list[date] = []
+    for element in snapshot.elements:
+        if not element.date_value:
+            continue
+        try:
+            observed_dates.append(date.fromisoformat(element.date_value))
+        except ValueError:
+            continue
+    requested_date = _requested_calendar_date(goal, observed_dates)
+    calendar_transition_pending = bool(
+        _has_calendar_request(goal)
+        and not observed_dates
+        and any(element.name.startswith("Done.") for element in snapshot.elements)
+    )
+    if requested_date:
+        exact_ids = {
+            element.element_id
+            for element in snapshot.elements
+            if element.date_value == requested_date.isoformat()
+        }
+        if exact_ids:
+            promoted: list[tuple[float, CandidateAction]] = []
+            for score, action in ranked:
+                if action.element_id in exact_ids and action.kind == ActionKind.CLICK:
+                    action = replace(
+                        action,
+                        description=(
+                            action.description
+                            + f" Exact requested calendar date {requested_date.isoformat()}: YES."
+                        ),
+                        goal_match=True,
+                    )
+                    score += 90
+                    strong_action_ids.add(action.action_id)
+                promoted.append((score, action))
+            ranked = promoted
+        else:
+            first, last = min(observed_dates), max(observed_dates)
+            direction = (
+                "previous"
+                if requested_date < first
+                else "next"
+                if requested_date > last
+                else None
+            )
+            if direction:
+                promoted = []
+                for score, action in ranked:
+                    element = elements_by_id.get(action.element_id or "")
+                    if (
+                        action.kind == ActionKind.CLICK
+                        and element
+                        and element.name.strip().casefold() == direction
+                    ):
+                        action = replace(
+                            action,
+                            description=(
+                                action.description
+                                + f" Requested date {requested_date.isoformat()} is {direction} of "
+                                f"the visible calendar range {first.isoformat()} to {last.isoformat()}: YES."
+                            ),
+                            goal_match=True,
+                        )
+                        score += 90
+                        strong_action_ids.add(action.action_id)
+                    promoted.append((score, action))
+                ranked = promoted
+
+    if calendar_transition_pending:
+        ranked = []
+        strong_action_ids.clear()
+
     has_pending_form_value = any(
         action.kind in {ActionKind.FILL, ActionKind.SELECT} and action.goal_match
         for _, action in ranked
@@ -529,7 +721,26 @@ def build_actions(
 
     controls: list[CandidateAction] = []
     visibly_busy = any(element.busy is True for element in snapshot.elements)
-    if snapshot.can_scroll_down:
+    if calendar_transition_pending:
+        if snapshot.can_scroll_up:
+            controls.append(
+                CandidateAction(
+                    "scroll_up",
+                    ActionKind.SCROLL_UP,
+                    "Scroll up to reveal the open calendar date grid",
+                    goal_match=True,
+                )
+            )
+        else:
+            controls.append(
+                CandidateAction(
+                    "wait",
+                    ActionKind.WAIT,
+                    "Wait briefly for the calendar month transition to finish",
+                    goal_match=True,
+                )
+            )
+    elif snapshot.can_scroll_down:
         controls.append(
             CandidateAction(
                 "scroll_down",
@@ -543,13 +754,15 @@ def build_actions(
                 goal_match=not has_direct_target,
             )
         )
-    if snapshot.can_scroll_up:
+    if snapshot.can_scroll_up and not calendar_transition_pending:
         controls.append(
             CandidateAction("scroll_up", ActionKind.SCROLL_UP, "Scroll up to earlier content")
         )
-    if snapshot.can_go_back:
+    if snapshot.can_go_back and not calendar_transition_pending:
         controls.append(CandidateAction("back", ActionKind.BACK, "Return to the previous page"))
-    if visibly_busy or (not has_direct_target and not snapshot.can_scroll_down):
+    if not calendar_transition_pending and (
+        visibly_busy or (not has_direct_target and not snapshot.can_scroll_down)
+    ):
         controls.append(
             CandidateAction(
                 "wait",
