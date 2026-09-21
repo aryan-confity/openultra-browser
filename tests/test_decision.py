@@ -32,7 +32,12 @@ class FakeAgent:
                     "probabilities": {targets[0]: 0.1, targets[1]: 0.9},
                 },
                 "completion": {"noul": 0.08},
+                "completion_change": {"noul": 0.12},
                 "stuck": {"noul": 0.03},
+                "error": {"noul": 0.01},
+                "loading": {"noul": 0.02},
+                "step_completion": {"noul": 0.18},
+                "step_completion_change": {"noul": 0.22},
             },
             "usage": {"input_tokens": 123, "output_tokens": 0},
         }
@@ -56,7 +61,11 @@ def test_operation_and_compatible_target_share_one_local_batch():
         CandidateAction("scroll_down", ActionKind.SCROLL_DOWN, "Scroll down"),
     )
     result = engine.decide(
-        goal="Open documentation", snapshot=snapshot, actions=actions, history=()
+        goal="Open documentation",
+        current_step="Open documentation",
+        snapshot=snapshot,
+        actions=actions,
+        history=(),
     )
 
     assert len(fake.calls) == 1
@@ -64,7 +73,12 @@ def test_operation_and_compatible_target_share_one_local_batch():
         "operation",
         "click_target",
         "completion",
+        "completion_change",
         "stuck",
+        "error",
+        "loading",
+        "step_completion",
+        "step_completion_change",
     }
     assert result.operation == "CLICK"
     assert result.proposed_action == "click_e2"
@@ -75,8 +89,16 @@ def test_operation_and_compatible_target_share_one_local_batch():
     state = fake.calls[0][0]
     assert state.index("Trust boundary") < state.index("Visible page text")
     assert state.index("Recent actions") < state.index("Visible page text")
-    assert result.goal_probability == 0.08
+    assert result.goal_probability == 0.12
+    assert result.completion_change_probability == 0.12
     assert result.stuck_probability == 0.03
+    assert result.error_probability == 0.01
+    assert result.loading_probability == 0.02
+    assert result.step_completion_probability == 0.18
+    assert result.step_completion_change_probability == 0.22
+    step_question = fake.calls[0][1]["step_completion"]
+    assert "current required step" in step_question["instructions"]
+    assert "control state" in step_question["instructions"]
 
 
 def test_completion_confirmation_is_a_focused_boolean_check():
@@ -132,3 +154,42 @@ def test_completion_confirmation_is_a_focused_boolean_check():
     )
 
     assert probability == 0.91
+
+
+def test_step_completion_confirmation_requires_no_further_action():
+    class StepAgent:
+        def predict(self, state, questions):
+            assert "Current required step: Open Condos for rent" in state
+            assert "URL changed" in state
+            assert set(questions) == {"step_complete"}
+            assert "no further action" in questions["step_complete"]["instructions"]
+            return {"answers": {"step_complete": {"noul": 0.77}}}
+
+    engine = OpenUltraDecisionEngine("unused", agent=StepAgent())
+    probability = engine.confirm_step_completion(
+        goal="Open Condos for rent and click Inquire",
+        current_step="Open Condos for rent",
+        snapshot=BrowserSnapshot(
+            "https://wdxproperties.com/properties/rent",
+            "Rental listings",
+            "Condos for rent",
+            (),
+        ),
+        history=(
+            StepRecord(
+                step=1,
+                url="https://wdxproperties.com/",
+                proposed_action="click_condos",
+                executed_action="click_condos",
+                description="Activate Condos for rent",
+                confidence=0.9,
+                goal_probability=0.2,
+                stuck_probability=0.0,
+                inference_ms=4.0,
+                changed=True,
+                change_summary="URL changed to rental listings",
+            ),
+        ),
+    )
+
+    assert probability == 0.77

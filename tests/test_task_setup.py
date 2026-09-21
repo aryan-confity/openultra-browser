@@ -59,3 +59,12 @@ def test_form_parser_leaves_unprovided_optional_details_absent():
         "phone": "0637859636",
         "rent or sell": "Rent",
     }
+
+
+def test_explicit_destination_wins_over_generic_search_startup():
+    setup = plan_task(
+        "Go to youtube.com and search for Neon AI stream and dislike his video"
+    )
+
+    assert setup.start_url == "https://youtube.com"
+    assert setup.prepared_inputs == {"search query": "Neon AI stream"}

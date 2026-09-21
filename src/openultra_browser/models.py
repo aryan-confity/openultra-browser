@@ -39,8 +39,10 @@ class ObservedElement:
     href: str = ""
     disabled: bool = False
     checked: bool | None = None
+    pressed: bool | None = None
     selected: bool | None = None
     expanded: bool | None = None
+    busy: bool | None = None
     submit_on_enter: bool = False
     options: tuple[ObservedOption, ...] = ()
     x: float = 0
@@ -56,6 +58,10 @@ class ObservedElement:
             parts.append(f"current value: {self.value}")
         if self.href:
             parts.append(f"destination: {self.href}")
+        for name in ("checked", "pressed", "selected", "expanded", "busy"):
+            value = getattr(self, name)
+            if value is not None:
+                parts.append(f"{name}: {str(value).lower()}")
         return " | ".join(parts)
 
     @property
@@ -118,6 +124,11 @@ class ModelDecision:
     operation: str = ""
     operation_probabilities: dict[str, float] = field(default_factory=dict)
     target_probabilities: dict[str, float] = field(default_factory=dict)
+    completion_change_probability: float = 0.0
+    error_probability: float = 0.0
+    loading_probability: float = 0.0
+    step_completion_probability: float = 0.0
+    step_completion_change_probability: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -139,10 +150,12 @@ class StepRecord:
     goal_probability: float
     stuck_probability: float
     inference_ms: float
+    action_kind: str | None = None
     changed: bool = False
     policy_intervened: bool = False
     policy_reason: str | None = None
     action_error: str | None = None
+    change_summary: str | None = None
     elapsed_ms: float = 0
 
 

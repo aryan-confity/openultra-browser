@@ -145,6 +145,18 @@ def test_unexplored_content_marks_scroll_as_progress_instead_of_waiting():
     assert "wait" not in by_id
 
 
+def test_visible_busy_state_offers_wait_without_hiding_ready_targets():
+    current = snapshot(
+        ObservedElement("e1", "button", "Load results", "button", busy=True),
+        ObservedElement("e2", "link", "Documentation", "a", href="/docs"),
+    )
+
+    result = build_actions(current, "Open Documentation", {}, 8, False)
+
+    assert "click_e2" in {action.action_id for action in result}
+    assert "wait" in {action.action_id for action in result}
+
+
 def test_select_action_keeps_exact_observed_value():
     result = build_actions(
         snapshot(
@@ -247,6 +259,7 @@ def test_first_requested_result_marks_first_dom_matching_target():
 
     assert result[0].action_id == "click_e1"
     assert "FIRST visible matching target: YES" in result[0].description
+    assert "click_e2" not in {action.action_id for action in result}
 
 
 def test_completed_ordered_task_exposes_only_completion():

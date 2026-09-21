@@ -13,6 +13,7 @@ def test_navigation_settlement_waits_for_new_document():
         ]
     )
     browser.evaluate = lambda _expression: next(values)
+    browser._wait_for_semantic_quiet = lambda **_kwargs: None
 
     assert browser._wait_for_navigation("https://example.com/start", timeout_seconds=0.2)
 

@@ -70,7 +70,8 @@ VALIDATE_TARGET_SCRIPT = r"""
     nodeId, role, label, node.value ?? null, node.checked ?? null, node.selectedIndex ?? null,
     node.readOnly ?? null, node.matches(':disabled'), node.getAttribute('aria-disabled'),
     node.getAttribute('aria-expanded'), node.getAttribute('aria-checked'),
-    node.getAttribute('aria-selected'), node.getAttribute('href'),
+    node.getAttribute('aria-pressed'), node.getAttribute('aria-selected'),
+    node.getAttribute('aria-busy'), node.getAttribute('href'),
     normal(scope?.innerText).slice(0, 800)
   ]);
   if (guard !== expectedGuard) return null;
@@ -128,6 +129,50 @@ SUBMISSION_OUTCOME_SCRIPT = r"""
       return;
     }
     setTimeout(check, 50);
+  };
+  check();
+})
+"""
+
+SEMANTIC_SETTLE_SCRIPT = r"""
+({ quietMs, timeoutMs }) => new Promise((resolve) => {
+  const started = performance.now();
+  let stableSince = started;
+  let previous = '';
+  const signature = () => {
+    const active = document.activeElement;
+    const busy = Boolean(document.querySelector(
+      '[aria-busy="true"],[data-loading="true"],.loading,.spinner,[role="progressbar"]'
+    ));
+    const controls = Array.from(document.querySelectorAll(
+      'a[href],button,input,textarea,select,[role="button"],[role="link"],'+
+      '[role="textbox"],[role="searchbox"],[role="combobox"],[role="option"]'
+    )).filter((node) => node.isConnected && !node.closest('[aria-hidden="true"],[inert]'));
+    const tail = controls.slice(-20).map((node) => [
+      node.tagName, node.getAttribute('role'), node.getAttribute('aria-busy'),
+      node.getAttribute('aria-expanded'), node.getAttribute('aria-pressed'),
+      'value' in node ? String(node.value).slice(0, 80) : '',
+      (node.innerText || node.getAttribute('aria-label') || '').trim().slice(0, 80)
+    ]);
+    return JSON.stringify([
+      location.href, document.readyState, busy, controls.length,
+      document.body?.innerText?.length || 0, active?.tagName || '', tail
+    ]);
+  };
+  const check = () => {
+    const now = performance.now();
+    const current = signature();
+    if (current !== previous) {
+      previous = current;
+      stableSince = now;
+    }
+    const busy = Boolean(document.querySelector('[aria-busy="true"],[data-loading="true"]'));
+    if ((!busy && document.readyState !== 'loading' && now - stableSince >= quietMs) ||
+        now - started >= timeoutMs) {
+      resolve({quiet: !busy && now - stableSince >= quietMs, waitedMs: now - started});
+      return;
+    }
+    setTimeout(check, 25);
   };
   check();
 })
@@ -390,13 +435,18 @@ class Browser:
                 )
             return bool(outcome and outcome.get("verified"))
         try:
-            self.evaluate(
-                "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
-                await_promise=True,
-            )
+            self._wait_for_semantic_quiet()
         except RuntimeError:
             pass
         return False
+
+    def _wait_for_semantic_quiet(
+        self, *, quiet_ms: int = 100, timeout_ms: int = 1_500
+    ) -> None:
+        self.evaluate(
+            f"({SEMANTIC_SETTLE_SCRIPT})({json.dumps({'quietMs': quiet_ms, 'timeoutMs': timeout_ms})})",
+            await_promise=True,
+        )
 
     def _wait_for_navigation(self, before_url: str, timeout_seconds: float = 2.0) -> bool:
         deadline = time.monotonic() + timeout_seconds
@@ -405,6 +455,7 @@ class Browser:
                 current_url = self.url
                 if current_url != before_url:
                     if self.evaluate("document.readyState") in {"interactive", "complete"}:
+                        self._wait_for_semantic_quiet(quiet_ms=125, timeout_ms=1_500)
                         return True
             except RuntimeError:
                 pass

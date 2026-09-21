@@ -13,7 +13,11 @@ from .models import ActionKind, BrowserSnapshot, CandidateAction, ModelDecision,
 from .observation import build_actions
 from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
-from .task_progress import TaskProgress
+from .task_progress import (
+    TaskProgress,
+    step_completion_disposition,
+    summarize_page_change,
+)
 
 TERMINAL_STATUSES = {
     "completed",
@@ -55,7 +59,9 @@ class InteractiveAgent:
         self.browser = browser_factory(config.start_url, text_limit=config.visible_text_chars)
         try:
             self.snapshot = self.browser.observe()
-            self.progress.sync_visible_state(self.snapshot)
+            self.progress.sync_visible_state(
+                self.snapshot, action_count=len(self.history)
+            )
             self.screenshot = self._screenshot()
             self._refresh()
         except BaseException:
@@ -96,7 +102,9 @@ class InteractiveAgent:
         return True, "Verified " + " and ".join(checks)
 
     def _refresh(self) -> None:
-        self.progress.sync_visible_state(self.snapshot)
+        self.progress.sync_visible_state(
+            self.snapshot, action_count=len(self.history)
+        )
         verified, reason = self._success(self.snapshot)
         if verified:
             self.status, self.reason, self.actions = "completed", reason, ()
@@ -128,18 +136,51 @@ class InteractiveAgent:
     def predict(self) -> dict[str, Any]:
         if self.terminal:
             raise ValueError("This run has stopped. Start a new task.")
-        self.snapshot = self.browser.observe()
-        self.screenshot = self._screenshot()
-        self._refresh()
-        if self.terminal:
-            return self.state()
-        self.decision = self.engine.decide(
-            goal=self.config.goal,
-            current_step=self.progress.current_step,
-            snapshot=self.snapshot,
-            actions=self.actions,
-            history=self.history,
-        )
+        while True:
+            self.snapshot = self.browser.observe()
+            self.screenshot = self._screenshot()
+            self._refresh()
+            if self.terminal:
+                return self.state()
+            self.decision = self.engine.decide(
+                goal=self.config.goal,
+                current_step=self.progress.current_step,
+                snapshot=self.snapshot,
+                actions=self.actions,
+                history=self.history,
+            )
+            if self.history and self.decision.error_probability >= 0.8:
+                self.status = "error"
+                self.reason = "The current page visibly rejects or errors after the last action"
+                self.actions = ()
+                return self.state()
+            disposition = step_completion_disposition(
+                self.progress, self.decision, self.history
+            )
+            step_verified = disposition == "verified"
+            confirm_step = getattr(self.engine, "confirm_step_completion", None)
+            if (
+                disposition == "confirm"
+                and self.progress.current_step
+                and callable(confirm_step)
+            ):
+                step_verified = (
+                    confirm_step(
+                        goal=self.config.goal,
+                        current_step=self.progress.current_step,
+                        snapshot=self.snapshot,
+                        history=self.history,
+                    )
+                    >= 0.45
+                )
+            if self.progress.current_step and step_verified:
+                self.progress.advance_current_step(
+                    self.snapshot, action_count=len(self.history)
+                )
+                self.decision = None
+                self.policy_result = None
+                continue
+            break
         self.policy_result = self.policy.choose(
             decision=self.decision,
             actions=self.actions,
@@ -177,6 +218,7 @@ class InteractiveAgent:
             goal_probability=decision.goal_probability,
             stuck_probability=decision.stuck_probability,
             inference_ms=decision.inference_ms,
+            action_kind=chosen.kind.value,
             policy_intervened=policy_result.intervened,
             policy_reason=policy_result.reason,
         )
@@ -193,9 +235,11 @@ class InteractiveAgent:
                 if callable(confirm)
                 else 0.0
             )
-            if confirmation >= 0.75:
+            if confirmation >= 0.45:
                 self.status = "completed"
-                self.reason = "Completion confirmed by two independent local checks"
+                self.reason = (
+                    "Verified atomic outcomes accepted by the independent completion check"
+                )
             else:
                 self.status = "needs_verification"
                 self.reason = "The model proposed completion without sufficient independent evidence"
@@ -214,14 +258,9 @@ class InteractiveAgent:
             if evidence:
                 record.description += f" Execution evidence: {evidence}."
             next_snapshot = self.browser.observe()
+            record.change_summary = summarize_page_change(self.snapshot, next_snapshot)
             record.changed = (
                 next_snapshot.fingerprint != self.snapshot.fingerprint or transport_verified
-            )
-            self.progress.record_verified_action(
-                chosen,
-                self.snapshot,
-                next_snapshot,
-                verified_change=transport_verified,
             )
             self.snapshot = next_snapshot
             self.status = "ready"

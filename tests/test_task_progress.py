@@ -1,5 +1,15 @@
-from openultra_browser.models import ActionKind, BrowserSnapshot, CandidateAction
-from openultra_browser.task_progress import TaskProgress, split_task_steps
+from openultra_browser.models import (
+    BrowserSnapshot,
+    ModelDecision,
+    ObservedElement,
+    StepRecord,
+)
+from openultra_browser.task_progress import (
+    TaskProgress,
+    split_task_steps,
+    step_completion_disposition,
+    summarize_page_change,
+)
 
 
 def snapshot(url: str, text: str = "") -> BrowserSnapshot:
@@ -19,7 +29,7 @@ def test_explicit_action_clauses_become_ordered_steps():
     )
 
 
-def test_form_fill_and_submit_remain_one_unfinished_step():
+def test_form_fill_and_submit_remain_one_observable_outcome():
     steps = split_task_steps(
         "Go to wdxproperties.com and go to Sell, fill this form with my details "
         "and submit Aryan, 0637859636, and choose looking to rent"
@@ -32,7 +42,17 @@ def test_form_fill_and_submit_remain_one_unfinished_step():
     )
 
 
-def test_visible_start_destination_advances_without_a_synthetic_action():
+def test_stateful_action_is_its_own_atomic_step():
+    assert split_task_steps(
+        "Go to youtube.com and search for Neon AI stream and dislike his video"
+    ) == (
+        "Go to youtube.com",
+        "search for Neon AI stream",
+        "dislike his video",
+    )
+
+
+def test_visible_start_destination_advances_without_model_inference():
     progress = TaskProgress.from_goal(
         "Go to wdxproperties.com and click Condos for rent"
     )
@@ -43,75 +63,89 @@ def test_visible_start_destination_advances_without_a_synthetic_action():
     assert progress.current_step == "click Condos for rent"
 
 
-def test_only_changed_goal_matching_actions_advance_one_step():
+def test_confirmed_current_step_advances_exactly_once():
     progress = TaskProgress.from_goal(
-        "Click Condos for rent and open the first listing details"
+        "Open Condos for rent and click Inquire in the first listing"
     )
-    matching = CandidateAction(
-        "click_e1", ActionKind.CLICK, "Activate Condos for rent", "e1", goal_match=True
+    result = snapshot("https://wdxproperties.com/properties/rent", "Rental listings")
+
+    progress.advance_current_step(result, action_count=3)
+
+    assert progress.completed_steps == ("Open Condos for rent",)
+    assert progress.current_step == "click Inquire in the first listing"
+    assert progress.history_boundary == 3
+
+
+def test_page_change_summary_records_url_and_control_state():
+    before = BrowserSnapshot(
+        "https://example.com/watch",
+        "Video",
+        "Video",
+        (ObservedElement("e1", "button", "Dislike", "button", pressed=False),),
     )
-    unrelated = CandidateAction(
-        "click_e2", ActionKind.CLICK, "Open Login", "e2", goal_match=False
+    after = BrowserSnapshot(
+        "https://example.com/watch?selected=dislike",
+        "Video",
+        "Video",
+        (ObservedElement("e1", "button", "Dislike", "button", pressed=True),),
     )
-    home = snapshot("https://wdxproperties.com/", "Home")
-    rent = snapshot("https://wdxproperties.com/properties/rent", "Rent")
 
-    progress.record_verified_action(unrelated, home, rent)
-    assert progress.index == 0
+    summary = summarize_page_change(before, after)
 
-    progress.record_verified_action(matching, home, rent)
-    assert progress.index == 1
-    assert progress.current_step == "open the first listing details"
+    assert "URL changed" in summary
+    assert "pressed=False->True" in summary
 
 
-def test_exploration_does_not_complete_a_semantic_task_step():
-    progress = TaskProgress.from_goal("Open the first listing details")
-    scroll = CandidateAction(
-        "scroll_down",
-        ActionKind.SCROLL_DOWN,
-        "Scroll to reveal more content",
-        goal_match=True,
+def decision(probability: float) -> ModelDecision:
+    return ModelDecision(
+        proposed_action="click_e1",
+        probabilities={"click_e1": 1.0},
+        confidence=1.0,
+        goal_probability=0.0,
+        stuck_probability=0.0,
+        inference_ms=1.0,
+        input_tokens=10,
+        step_completion_probability=probability,
     )
-    before = snapshot("https://example.com/results", "Top")
-    after = snapshot("https://example.com/results", "More results")
-
-    progress.record_verified_action(scroll, before, after)
-
-    assert progress.index == 0
-    assert progress.current_step == "Open the first listing details"
 
 
-def test_form_fill_does_not_complete_a_step_that_still_requires_submit():
-    progress = TaskProgress.from_goal("Fill the form with Aryan and submit it")
-    fill = CandidateAction(
-        "fill_name",
-        ActionKind.FILL,
-        "Enter name",
-        "e1",
-        input_key="name",
-        goal_match=True,
+def record(kind: str, *, changed: bool = True) -> StepRecord:
+    return StepRecord(
+        step=1,
+        url="https://example.com",
+        proposed_action=kind,
+        executed_action=kind,
+        description=kind,
+        confidence=1.0,
+        goal_probability=0.0,
+        stuck_probability=0.0,
+        inference_ms=1.0,
+        action_kind=kind,
+        changed=changed,
     )
-    before = snapshot("https://example.com/form", "Empty")
-    after = snapshot("https://example.com/form", "Name Aryan")
-
-    progress.record_verified_action(fill, before, after)
-
-    assert progress.index == 0
 
 
-def test_form_submit_step_completes_only_from_a_submit_control():
-    progress = TaskProgress.from_goal("Fill the form, choose Rent, and submit it")
-    rent = CandidateAction(
-        "click_rent", ActionKind.CLICK, "Activate button Rent", "e1", goal_match=True
+def test_previous_step_evidence_cannot_complete_the_next_step():
+    progress = TaskProgress(("Open rentals", "Click Inquire"), index=1, history_boundary=1)
+
+    disposition = step_completion_disposition(progress, decision(0.89), (record("click"),))
+
+    assert disposition == "pending"
+
+
+def test_exploration_change_cannot_unlock_step_confirmation():
+    progress = TaskProgress(("Click Inquire",), history_boundary=0)
+
+    disposition = step_completion_disposition(
+        progress, decision(0.8), (record("scroll_down"),)
     )
-    send = CandidateAction(
-        "click_send", ActionKind.CLICK, "Activate button Send", "e2", goal_match=True
-    )
-    before = snapshot("https://example.com/form", "Form")
-    after = snapshot("https://example.com/form", "Changed")
 
-    progress.record_verified_action(rent, before, after)
-    assert progress.index == 0
+    assert disposition == "pending"
 
-    progress.record_verified_action(send, before, after, verified_change=True)
-    assert progress.complete
+
+def test_semantic_change_with_mid_confidence_requests_focused_confirmation():
+    progress = TaskProgress(("Click Inquire",), history_boundary=0)
+
+    disposition = step_completion_disposition(progress, decision(0.7), (record("click"),))
+
+    assert disposition == "confirm"

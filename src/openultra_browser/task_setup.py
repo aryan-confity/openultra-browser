@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from .task_progress import split_task_steps
+
 GOOGLE_START_URL = "https://www.google.com/?hl=en"
 
 URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
@@ -58,10 +60,11 @@ def _explicit_destination(goal: str) -> str | None:
 
 
 def _search_text(goal: str) -> str | None:
-    match = SEARCH_PATTERN.search(goal)
-    if match:
-        value = match.group(1).strip(" \t\r\n\"'.,;:!?")
-        return value or None
+    for step in split_task_steps(goal):
+        match = SEARCH_PATTERN.search(step)
+        if match:
+            value = match.group(1).strip(" \t\r\n\"'.,;:!?")
+            return value or None
     return None
 
 
@@ -110,14 +113,15 @@ def plan_task(goal: str) -> TaskSetup:
     if not goal:
         raise ValueError("goal must not be empty")
 
-    search_text = _search_text(goal)
-    asks_for_search = search_text is not None
     destination = _explicit_destination(goal)
-    if asks_for_search:
-        return TaskSetup(GOOGLE_START_URL, {"search query": search_text})
     form_inputs = _form_inputs(goal)
+    search_text = _search_text(goal)
+    if search_text:
+        form_inputs["search query"] = search_text
     if destination:
         parsed = urlparse(destination)
         if parsed.scheme in {"http", "https"} and parsed.hostname:
             return TaskSetup(destination, form_inputs)
+    if search_text:
+        return TaskSetup(GOOGLE_START_URL, form_inputs)
     return TaskSetup(GOOGLE_START_URL, {"search query": goal})

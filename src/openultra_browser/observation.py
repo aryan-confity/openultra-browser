@@ -67,7 +67,8 @@ OBSERVE_SCRIPT = r"""
       nodeId, role, label, node.value ?? null, node.checked ?? null, node.selectedIndex ?? null,
       node.readOnly ?? null, node.matches(':disabled'), node.getAttribute('aria-disabled'),
       node.getAttribute('aria-expanded'), node.getAttribute('aria-checked'),
-      node.getAttribute('aria-selected'), node.getAttribute('href'),
+      node.getAttribute('aria-pressed'), node.getAttribute('aria-selected'),
+      node.getAttribute('aria-busy'), node.getAttribute('href'),
       normal(scope?.innerText).slice(0, 800)
     ]);
   };
@@ -95,8 +96,10 @@ OBSERVE_SCRIPT = r"""
       href: node.tagName === 'A' ? node.href : '',
       disabled: false,
       checked: typeof node.checked === 'boolean' ? node.checked : null,
+      pressed: node.getAttribute('aria-pressed') === null ? null : node.getAttribute('aria-pressed') === 'true',
       selected: node.getAttribute('aria-selected') === null ? null : node.getAttribute('aria-selected') === 'true',
       expanded: node.getAttribute('aria-expanded') === null ? null : node.getAttribute('aria-expanded') === 'true',
+	  busy: node.getAttribute('aria-busy') === null ? null : node.getAttribute('aria-busy') === 'true',
 	  submit_on_enter: ['INPUT', 'TEXTAREA'].includes(node.tagName) && Boolean(node.form) && (
 	    ['search', 'go'].includes(normal(node.getAttribute('enterkeyhint')).toLowerCase()) ||
 	    node.type === 'search' || role === 'searchbox' ||
@@ -445,9 +448,17 @@ def build_actions(
         ]
 
     if "first" in _tokens(goal):
-        for index, (score, action) in enumerate(ranked):
-            if action.kind == ActionKind.CLICK and action.goal_match:
-                ranked[index] = (
+        first_matching_click = next(
+            (
+                action.action_id
+                for _, action in ranked
+                if action.kind == ActionKind.CLICK and action.goal_match
+            ),
+            None,
+        )
+        if first_matching_click:
+            ranked = [
+                (
                     score + 25,
                     replace(
                         action,
@@ -457,7 +468,15 @@ def build_actions(
                         ),
                     ),
                 )
-                break
+                if action.action_id == first_matching_click
+                else (score, action)
+                for score, action in ranked
+                if not (
+                    action.kind == ActionKind.CLICK
+                    and action.goal_match
+                    and action.action_id != first_matching_click
+                )
+            ]
 
     transition_pending = bool(
         preferred_domains and urlparse(snapshot.url).hostname not in preferred_domains
@@ -476,6 +495,7 @@ def build_actions(
         ranked = [(score, action) for score, action in ranked if action.goal_match]
 
     controls: list[CandidateAction] = []
+    visibly_busy = any(element.busy is True for element in snapshot.elements)
     if snapshot.can_scroll_down:
         controls.append(
             CandidateAction(
@@ -496,9 +516,18 @@ def build_actions(
         )
     if snapshot.can_go_back:
         controls.append(CandidateAction("back", ActionKind.BACK, "Return to the previous page"))
-    if not has_direct_target and not snapshot.can_scroll_down:
+    if visibly_busy or (not has_direct_target and not snapshot.can_scroll_down):
         controls.append(
-            CandidateAction("wait", ActionKind.WAIT, "Wait briefly for the page to update")
+            CandidateAction(
+                "wait",
+                ActionKind.WAIT,
+                (
+                    "Wait briefly. Deterministic observer: a visible control is busy: YES."
+                    if visibly_busy
+                    else "Wait briefly for the page to update"
+                ),
+                goal_match=visibly_busy and not has_direct_target,
+            )
         )
     reserved = len(controls)
     ranked.sort(key=lambda item: (-item[0], item[1].action_id))

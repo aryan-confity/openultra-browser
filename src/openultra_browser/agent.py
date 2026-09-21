@@ -12,7 +12,11 @@ from .models import ActionKind, RunResult, StepRecord
 from .observation import build_actions
 from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
-from .task_progress import TaskProgress
+from .task_progress import (
+    TaskProgress,
+    step_completion_disposition,
+    summarize_page_change,
+)
 from .trace import write_trace
 
 
@@ -53,7 +57,7 @@ class BrowserAgent:
                     break
                 step_started = time.perf_counter()
                 snapshot = browser.observe()
-                progress.sync_visible_state(snapshot)
+                progress.sync_visible_state(snapshot, action_count=len(history))
                 final_url = snapshot.url
                 text_verified = not self.config.success_text or (
                     self.config.success_text.casefold() in snapshot.visible_text.casefold()
@@ -76,23 +80,55 @@ class BrowserAgent:
                     reason = "Verified " + " and ".join(checks)
                     break
 
-                actions = build_actions(
-                    snapshot,
-                    progress.current_step or self.config.goal,
-                    self.config.prepared_inputs,
-                    self.config.max_candidates,
-                    include_done=not has_verifier and progress.complete,
-                    success_url_prefix=self.config.success_url_prefix,
-                    success_url_regex=self.config.success_url_regex,
-                    preferred_domains=self.config.preferred_domains,
-                )
-                decision = self.engine.decide(
-                    goal=self.config.goal,
-                    current_step=progress.current_step,
-                    snapshot=snapshot,
-                    actions=actions,
-                    history=history,
-                )
+                while True:
+                    actions = build_actions(
+                        snapshot,
+                        progress.current_step or self.config.goal,
+                        self.config.prepared_inputs,
+                        self.config.max_candidates,
+                        include_done=not has_verifier and progress.complete,
+                        success_url_prefix=self.config.success_url_prefix,
+                        success_url_regex=self.config.success_url_regex,
+                        preferred_domains=self.config.preferred_domains,
+                    )
+                    decision = self.engine.decide(
+                        goal=self.config.goal,
+                        current_step=progress.current_step,
+                        snapshot=snapshot,
+                        actions=actions,
+                        history=history,
+                    )
+                    if history and decision.error_probability >= 0.8:
+                        status = "error"
+                        reason = "The current page visibly rejects or errors after the last action"
+                        break
+                    disposition = step_completion_disposition(
+                        progress, decision, history
+                    )
+                    step_verified = disposition == "verified"
+                    confirm_step = getattr(self.engine, "confirm_step_completion", None)
+                    if (
+                        disposition == "confirm"
+                        and progress.current_step
+                        and callable(confirm_step)
+                    ):
+                        step_verified = (
+                            confirm_step(
+                                goal=self.config.goal,
+                                current_step=progress.current_step,
+                                snapshot=snapshot,
+                                history=history,
+                            )
+                            >= 0.45
+                        )
+                    if progress.current_step and step_verified:
+                        progress.advance_current_step(
+                            snapshot, action_count=len(history)
+                        )
+                        continue
+                    break
+                if status == "error":
+                    break
                 policy = self.policy.choose(
                     decision=decision,
                     actions=actions,
@@ -111,6 +147,7 @@ class BrowserAgent:
                     goal_probability=decision.goal_probability,
                     stuck_probability=decision.stuck_probability,
                     inference_ms=decision.inference_ms,
+                    action_kind=chosen.kind.value if chosen else None,
                     policy_intervened=policy.intervened,
                     policy_reason=policy.reason,
                 )
@@ -128,9 +165,11 @@ class BrowserAgent:
                         if callable(confirm)
                         else 0.0
                     )
-                    if confirmation >= 0.75:
+                    if confirmation >= 0.45:
                         status = "completed"
-                        reason = "Completion confirmed by two independent local checks"
+                        reason = (
+                            "Verified atomic outcomes accepted by the independent completion check"
+                        )
                     else:
                         status = "needs_verification"
                         reason = (
@@ -151,14 +190,9 @@ class BrowserAgent:
                     if evidence:
                         record.description += f" Execution evidence: {evidence}."
                     next_snapshot = browser.observe()
+                    record.change_summary = summarize_page_change(snapshot, next_snapshot)
                     record.changed = (
                         next_snapshot.fingerprint != snapshot.fingerprint or transport_verified
-                    )
-                    progress.record_verified_action(
-                        chosen,
-                        snapshot,
-                        next_snapshot,
-                        verified_change=transport_verified,
                     )
                 except StalePage as error:
                     record.action_error = f"{type(error).__name__}: {error}"
