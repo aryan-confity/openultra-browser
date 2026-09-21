@@ -43,8 +43,8 @@ button, textarea { -webkit-tap-highlight-color: transparent; }
 }
 
 .rail-header { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.brand { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; font-size: 16px; font-weight: 680; }
-.brand-mark, .empty-symbol {
+.brand { color: inherit; text-decoration: none; font-size: 16px; font-weight: 700; }
+.empty-symbol {
   display: grid;
   place-items: center;
   width: 28px;
@@ -116,19 +116,20 @@ button:disabled { opacity: .38; cursor: default; }
 .metric { min-width: 0; padding-right: 12px; }
 .metric + .metric { padding-left: 12px; border-left: 1px solid var(--line); }
 .metric-label { display: block; margin-bottom: 5px; color: #737b73; font-size: 11px; font-weight: 620; letter-spacing: .1px; }
-.metric strong { display: flex; align-items: baseline; gap: 4px; min-width: 0; color: #303530; font: 650 14px var(--mono); letter-spacing: 0; white-space: nowrap; }
-.metric:first-child strong { font-size: 15px; color: #222722; }
+.metric strong { display: flex; align-items: baseline; gap: 5px; min-width: 0; color: #303530; font: 650 17px var(--mono); letter-spacing: 0; white-space: nowrap; }
+.metric:first-child strong { font-size: 18px; color: #222722; }
 .metric b { font: inherit; }
-.metric small { color: #737b73; font: 500 11px var(--mono); }
+.metric small { color: #737b73; font: 500 12px var(--mono); }
 .run-controls { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 11px; }
 
 .activity { min-height: 0; flex: 1; display: flex; flex-direction: column; margin-top: 25px; overflow: hidden; }
 .section-label { display: flex; justify-content: space-between; }
+.section-label span:last-child { color: #343a34; font: 650 12px var(--mono); }
 .current-action { margin: 12px 0; color: #343a34; font-size: 13px; line-height: 1.5; }
 .history { min-height: 0; overflow: auto; border-top: 1px solid var(--line); }
 .history:empty { border-top: 0; }
 .trace-row { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 9px; padding: 11px 0; border-bottom: 1px solid rgb(29 35 30 / 8%); font-size: 12px; line-height: 1.48; }
-.trace-row span { padding-top: 1px; color: #899089; font: 500 10px var(--mono); }
+.trace-row span { padding-top: 1px; color: #7d857d; font: 600 11px var(--mono); }
 .trace-row p { margin: 0; color: #5b635b; }
 footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line); color: #7d857d; font-size: 11px; }
 
