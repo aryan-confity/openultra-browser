@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from openultra_browser.cli import build_parser
-from openultra_browser.inspector import STATIC_ROOT, _bounded_float, _bounded_int, _bounded_text
+from openultra_browser.inspector import (
+    STATIC_ROOT,
+    InspectorController,
+    _bounded_float,
+    _bounded_int,
+    _bounded_text,
+)
 
 
 def test_inspector_command_is_available():
@@ -34,6 +40,7 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert "requestAnimationFrame(() => requestAnimationFrame(resolve))" in script
     assert 'await call("reset"' in script
     assert "await runAutomatically()" in script
+    assert "payload.run_id = state.run_id" in script
 
 
 def test_inspector_static_assets_are_packaged_below_the_module():
@@ -61,3 +68,34 @@ def test_inspector_request_limits_fail_closed():
             assert value in str(error)
         else:
             raise AssertionError("invalid inspector input was accepted")
+
+
+def test_stale_run_cannot_issue_commands(monkeypatch):
+    class FakeInteractiveAgent:
+        def __init__(self, _config, *, decision_engine):
+            self.closed = False
+
+        def state(self):
+            return {"status": "ready"}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("openultra_browser.inspector.InteractiveAgent", FakeInteractiveAgent)
+    monkeypatch.setattr(
+        "openultra_browser.inspector.OpenUltraDecisionEngine", lambda _model: object()
+    )
+    controller = InspectorController("model")
+    first = controller.reset({"goal": "Open https://example.com"})
+    first_run_id = controller.run_id
+    second = controller.reset({"goal": "Open https://example.org"})
+
+    assert first["status"] == "ready"
+    assert second["status"] == "ready"
+    assert controller.run_id != first_run_id
+    try:
+        controller.command("predict", {"run_id": first_run_id})
+    except ValueError as error:
+        assert "replaced" in str(error)
+    else:
+        raise AssertionError("a stale inspector run controlled the current task")

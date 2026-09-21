@@ -24,10 +24,11 @@ class InspectorController:
         self.model = model
         self.engine = None
         self.agent: InteractiveAgent | None = None
+        self.run_id: str | None = None
 
     def state(self) -> dict:
         if self.agent:
-            return self.agent.state()
+            return {**self.agent.state(), "run_id": self.run_id}
         return {
             "status": "idle",
             "reason": "Ready for a task",
@@ -43,6 +44,7 @@ class InspectorController:
             "max_seconds": 120,
             "model": self.model,
             "network_model_calls": 0,
+            "run_id": None,
         }
 
     def reset(self, body: dict) -> dict:
@@ -79,10 +81,12 @@ class InspectorController:
             allow_risky=body.get("allow_risky") is True,
             allow_external_navigation=body.get("url") in (None, ""),
         )
-        self.close()
         if self.engine is None:
             self.engine = OpenUltraDecisionEngine(self.model)
-        self.agent = InteractiveAgent(config, decision_engine=self.engine)
+        next_agent = InteractiveAgent(config, decision_engine=self.engine)
+        self.close()
+        self.agent = next_agent
+        self.run_id = secrets.token_urlsafe(12)
         return self.agent.state()
 
     def frame(self) -> dict:
@@ -92,20 +96,27 @@ class InspectorController:
 
     def command(self, name: str, body: dict) -> dict:
         if name == "reset":
-            return self.reset(body)
+            state = self.reset(body)
+            return {**state, "run_id": self.run_id}
         if self.agent is None:
             raise ValueError("Start a task first")
+        if body.get("run_id") != self.run_id:
+            raise ValueError("This task was replaced by a newer run")
         if name == "predict":
-            return self.agent.predict()
+            return {**self.agent.predict(), "run_id": self.run_id}
         if name == "act":
-            return self.agent.act(_bounded_text(body.get("fingerprint"), "fingerprint", 128))
+            return {
+                **self.agent.act(_bounded_text(body.get("fingerprint"), "fingerprint", 128)),
+                "run_id": self.run_id,
+            }
         if name == "tick":
-            return self.agent.tick()
+            return {**self.agent.tick(), "run_id": self.run_id}
         raise ValueError("Unknown inspector command")
 
     def close(self) -> None:
         agent = self.agent
         self.agent = None
+        self.run_id = None
         if agent:
             agent.close()
 
@@ -161,6 +172,7 @@ def run_inspector(
     token = secrets.token_urlsafe(32)
     controller = InspectorController(model or default_model_path())
     lock = threading.Lock()
+    reset_requested = threading.Event()
     atexit.register(controller.close)
 
     class Handler(BaseHTTPRequestHandler):
@@ -231,8 +243,18 @@ def run_inspector(
             ):
                 self._json(403, {"error": "Local inspector requests only"})
                 return
-            if not lock.acquire(blocking=False):
-                self._json(409, {"error": "A browser command is already running"})
+            command_name = self.path.removeprefix("/api/")
+            is_reset = command_name == "reset"
+            if is_reset:
+                reset_requested.set()
+            elif reset_requested.is_set():
+                self._json(409, {"error": "A newer task is taking control"})
+                return
+            acquired = lock.acquire(timeout=120)
+            if not acquired:
+                if is_reset:
+                    reset_requested.clear()
+                self._json(503, {"error": "The browser command did not finish in time"})
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -241,7 +263,7 @@ def run_inspector(
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError("Request body must be an object")
-                result = controller.command(self.path.removeprefix("/api/"), body)
+                result = controller.command(command_name, body)
                 self._json(200, result)
             except (ValueError, RuntimeError, TimeoutError) as error:
                 self._json(400, {"error": str(error)})
@@ -249,6 +271,8 @@ def run_inspector(
                 self._json(500, {"error": "Inspector command failed; no automatic retry occurred"})
             finally:
                 lock.release()
+                if is_reset:
+                    reset_requested.clear()
 
         def log_message(self, *_args) -> None:
             return

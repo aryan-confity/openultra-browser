@@ -12,6 +12,7 @@ from .models import ActionKind, RunResult, StepRecord
 from .observation import build_actions
 from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
+from .task_progress import TaskProgress
 from .trace import write_trace
 
 
@@ -41,6 +42,7 @@ class BrowserAgent:
         status = "max_steps"
         reason = f"Reached the {self.config.max_steps}-step limit"
         final_url = self.config.start_url
+        progress = TaskProgress.from_goal(self.config.goal)
 
         with self.browser_factory(
             self.config.start_url, text_limit=self.config.visible_text_chars
@@ -51,6 +53,7 @@ class BrowserAgent:
                     break
                 step_started = time.perf_counter()
                 snapshot = browser.observe()
+                progress.sync_visible_state(snapshot)
                 final_url = snapshot.url
                 text_verified = not self.config.success_text or (
                     self.config.success_text.casefold() in snapshot.visible_text.casefold()
@@ -75,16 +78,17 @@ class BrowserAgent:
 
                 actions = build_actions(
                     snapshot,
-                    self.config.goal,
+                    progress.current_step or self.config.goal,
                     self.config.prepared_inputs,
                     self.config.max_candidates,
-                    include_done=not has_verifier,
+                    include_done=not has_verifier and progress.complete,
                     success_url_prefix=self.config.success_url_prefix,
                     success_url_regex=self.config.success_url_regex,
                     preferred_domains=self.config.preferred_domains,
                 )
                 decision = self.engine.decide(
                     goal=self.config.goal,
+                    current_step=progress.current_step,
                     snapshot=snapshot,
                     actions=actions,
                     history=history,
@@ -121,7 +125,7 @@ class BrowserAgent:
                     confirm = getattr(self.engine, "confirm_completion", None)
                     confirmation = (
                         confirm(goal=self.config.goal, snapshot=snapshot, history=history)
-                        if decision.goal_probability >= 0.75 and callable(confirm)
+                        if callable(confirm)
                         else 0.0
                     )
                     if confirmation >= 0.75:
@@ -143,6 +147,7 @@ class BrowserAgent:
                     browser.act(chosen, snapshot, self.config.prepared_inputs)
                     next_snapshot = browser.observe()
                     record.changed = next_snapshot.fingerprint != snapshot.fingerprint
+                    progress.record_verified_action(chosen, snapshot, next_snapshot)
                 except StalePage as error:
                     record.action_error = f"{type(error).__name__}: {error}"
                     record.executed_action = None
@@ -185,6 +190,8 @@ class BrowserAgent:
                 "model": self.config.model,
                 "allowed_domains": sorted(self.config.effective_allowed_domains),
                 "network_model_calls": 0,
+                "task_steps": list(progress.steps),
+                "completed_steps": list(progress.completed_steps),
             },
         )
         if self.config.trace_path:

@@ -13,6 +13,7 @@ from .models import ActionKind, BrowserSnapshot, CandidateAction, ModelDecision,
 from .observation import build_actions
 from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
+from .task_progress import TaskProgress
 
 TERMINAL_STATUSES = {
     "completed",
@@ -50,9 +51,11 @@ class InteractiveAgent:
         self.actions: tuple[CandidateAction, ...] = ()
         self.status = "ready"
         self.reason = "Page observed and ready for a decision"
+        self.progress = TaskProgress.from_goal(config.goal)
         self.browser = browser_factory(config.start_url, text_limit=config.visible_text_chars)
         try:
             self.snapshot = self.browser.observe()
+            self.progress.sync_visible_state(self.snapshot)
             self.screenshot = self._screenshot()
             self._refresh()
         except BaseException:
@@ -93,6 +96,7 @@ class InteractiveAgent:
         return True, "Verified " + " and ".join(checks)
 
     def _refresh(self) -> None:
+        self.progress.sync_visible_state(self.snapshot)
         verified, reason = self._success(self.snapshot)
         if verified:
             self.status, self.reason, self.actions = "completed", reason, ()
@@ -112,10 +116,10 @@ class InteractiveAgent:
         )
         self.actions = build_actions(
             self.snapshot,
-            self.config.goal,
+            self.progress.current_step or self.config.goal,
             self.config.prepared_inputs,
             self.config.max_candidates,
-            include_done=not has_verifier,
+            include_done=not has_verifier and self.progress.complete,
             success_url_prefix=self.config.success_url_prefix,
             success_url_regex=self.config.success_url_regex,
             preferred_domains=self.config.preferred_domains,
@@ -131,6 +135,7 @@ class InteractiveAgent:
             return self.state()
         self.decision = self.engine.decide(
             goal=self.config.goal,
+            current_step=self.progress.current_step,
             snapshot=self.snapshot,
             actions=self.actions,
             history=self.history,
@@ -185,7 +190,7 @@ class InteractiveAgent:
                     snapshot=self.snapshot,
                     history=self.history,
                 )
-                if decision.goal_probability >= 0.75 and callable(confirm)
+                if callable(confirm)
                 else 0.0
             )
             if confirmation >= 0.75:
@@ -205,6 +210,7 @@ class InteractiveAgent:
             self.browser.act(chosen, self.snapshot, self.config.prepared_inputs)
             next_snapshot = self.browser.observe()
             record.changed = next_snapshot.fingerprint != self.snapshot.fingerprint
+            self.progress.record_verified_action(chosen, self.snapshot, next_snapshot)
             self.snapshot = next_snapshot
             self.status = "ready"
             self.reason = "Page observed and ready for a decision"
@@ -302,6 +308,9 @@ class InteractiveAgent:
             "decision": decision,
             "policy": policy,
             "history": [asdict(row) for row in self.history],
+            "task_steps": list(self.progress.steps),
+            "completed_steps": list(self.progress.completed_steps),
+            "current_step": self.progress.current_step,
             "elapsed_ms": round(self.elapsed_ms),
             "started_at_epoch_ms": self.started_at_epoch_ms,
             "max_steps": self.config.max_steps,

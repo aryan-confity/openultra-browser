@@ -42,10 +42,12 @@ function drawTimer() {
 requestAnimationFrame(drawTimer);
 
 async function call(name, body = {}) {
+  const payload = { ...body };
+  if (name !== "reset" && state?.run_id) payload.run_id = state.run_id;
   const response = await fetch(`/api/${name}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Inspector-Token": token },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "OpenUltra request failed");

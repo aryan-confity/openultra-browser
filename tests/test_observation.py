@@ -212,6 +212,55 @@ def test_generic_navigation_words_do_not_create_a_direct_match():
     assert "wait" in {action.action_id for action in result}
 
 
+def test_weak_relation_words_do_not_make_a_backlink_goal_progress():
+    result = build_actions(
+        snapshot(
+            ObservedElement(
+                "e1",
+                "link",
+                "Browse rentals in Bangkok",
+                "a",
+                href="/properties/rent/Bangkok",
+            )
+        ),
+        "get the first option details page and the final page",
+        {},
+        6,
+        False,
+    )
+
+    click = next(action for action in result if action.action_id == "click_e1")
+    assert not click.goal_match
+
+
+def test_first_requested_result_marks_first_dom_matching_target():
+    result = build_actions(
+        snapshot(
+            ObservedElement("e1", "link", "View details for Alpha", "a", href="/alpha"),
+            ObservedElement("e2", "link", "View details for Beta", "a", href="/beta"),
+        ),
+        "Open the first listing details",
+        {},
+        6,
+        False,
+    )
+
+    assert result[0].action_id == "click_e1"
+    assert "FIRST visible matching target: YES" in result[0].description
+
+
+def test_completed_ordered_task_exposes_only_completion():
+    result = build_actions(
+        snapshot(ObservedElement("e1", "link", "Browse rentals", "a", href="/rent")),
+        "Open the listing details",
+        {},
+        6,
+        True,
+    )
+
+    assert [action.action_id for action in result] == ["done"]
+
+
 def test_query_terms_in_destination_do_not_create_a_direct_match():
     result = build_actions(
         snapshot(

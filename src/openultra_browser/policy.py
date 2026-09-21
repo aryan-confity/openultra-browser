@@ -82,9 +82,22 @@ class SafetyPolicy:
             key=lambda action_id: decision.probabilities[action_id],
             reverse=True,
         )
+        direct_progress = [
+            action.action_id
+            for action in actions
+            if action.goal_match and action.action_id != decision.proposed_action
+        ]
+        proposed = by_id.get(decision.proposed_action)
+        proposed_is_progress = bool(proposed and proposed.goal_match)
         ranked = [
-            decision.proposed_action,
-            *(action_id for action_id in fallback if action_id != decision.proposed_action),
+            *([decision.proposed_action] if proposed_is_progress else []),
+            *direct_progress,
+            *([decision.proposed_action] if not proposed_is_progress else []),
+            *(
+                action_id
+                for action_id in fallback
+                if action_id != decision.proposed_action and action_id not in direct_progress
+            ),
         ]
         rejected: list[str] = []
         for action_id in ranked:
@@ -101,7 +114,11 @@ class SafetyPolicy:
             ):
                 rejected.append(f"{action_id}: a visible goal-progress action remains")
                 continue
-            if action.kind == ActionKind.DONE and decision.goal_probability < 0.75:
+            if (
+                action.kind == ActionKind.DONE
+                and decision.goal_probability < 0.75
+                and any(candidate.kind != ActionKind.DONE for candidate in actions)
+            ):
                 rejected.append(
                     f"{action_id}: independent completion confidence is below threshold"
                 )
@@ -120,7 +137,15 @@ class SafetyPolicy:
                 proposed_action=decision.proposed_action,
                 executed_action=action_id,
                 intervened=action_id != decision.proposed_action,
-                reason="; ".join(rejected) if rejected else None,
+                reason=(
+                    "; ".join(rejected)
+                    if rejected
+                    else (
+                        "Visible deterministic goal progress takes precedence"
+                        if action_id != decision.proposed_action and action.goal_match
+                        else None
+                    )
+                ),
             )
         return PolicyDecision(
             proposed_action=decision.proposed_action,

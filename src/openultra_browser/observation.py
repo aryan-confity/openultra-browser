@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from urllib.parse import urljoin, urlparse
 
 from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedElement, ObservedOption
@@ -179,11 +180,18 @@ GOAL_STOPWORDS = {
     "click",
     "find",
     "for",
+    "from",
+    "get",
     "go",
     "google",
+    "in",
     "navigate",
+    "of",
+    "on",
     "open",
+    "option",
     "official",
+    "page",
     "please",
     "properties",
     "property",
@@ -194,6 +202,7 @@ GOAL_STOPWORDS = {
     "the",
     "then",
     "to",
+    "with",
     "website",
 }
 
@@ -228,6 +237,15 @@ def build_actions(
     success_url_regex: str | None = None,
     preferred_domains: frozenset[str] = frozenset(),
 ) -> tuple[CandidateAction, ...]:
+    if include_done:
+        return (
+            CandidateAction(
+                "done",
+                ActionKind.DONE,
+                "Finish because every ordered task step has verified browser progress",
+            ),
+        )
+
     ranked: list[tuple[float, CandidateAction]] = []
     strong_action_ids: set[str] = set()
     for element in snapshot.elements:
@@ -360,6 +378,21 @@ def build_actions(
             if verifier_match or preferred_match:
                 strong_action_ids.add(action.action_id)
 
+    if "first" in _tokens(goal):
+        for index, (score, action) in enumerate(ranked):
+            if action.kind == ActionKind.CLICK and action.goal_match:
+                ranked[index] = (
+                    score + 25,
+                    replace(
+                        action,
+                        description=(
+                            action.description
+                            + " Requested ordinal: FIRST visible matching target: YES."
+                        ),
+                    ),
+                )
+                break
+
     transition_pending = bool(
         preferred_domains and urlparse(snapshot.url).hostname not in preferred_domains
     )
@@ -400,12 +433,6 @@ def build_actions(
     if not has_direct_target and not snapshot.can_scroll_down:
         controls.append(
             CandidateAction("wait", ActionKind.WAIT, "Wait briefly for the page to update")
-        )
-    if include_done:
-        controls.append(
-            CandidateAction(
-                "done", ActionKind.DONE, "Finish because every goal is visibly satisfied"
-            )
         )
     reserved = len(controls)
     ranked.sort(key=lambda item: (-item[0], item[1].action_id))

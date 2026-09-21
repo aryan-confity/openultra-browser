@@ -173,6 +173,69 @@ def test_done_requires_observed_progress_and_no_visible_goal_action():
     )
 
     assert no_progress.executed_action == "click"
-    assert "no observable task progress" in no_progress.reason
+    assert "deterministic goal progress" in no_progress.reason
     assert after_progress.executed_action == "click"
-    assert "goal-progress action remains" in after_progress.reason
+    assert "deterministic goal progress" in after_progress.reason
+
+
+def test_rejected_done_falls_back_to_first_ranked_direct_progress_target():
+    exact = CandidateAction(
+        "condos", ActionKind.CLICK, "Activate Condos for rent", "e1", goal_match=True
+    )
+    partial = CandidateAction(
+        "rent", ActionKind.CLICK, "Activate Rent", "e2", goal_match=True
+    )
+    scroll = CandidateAction("scroll", ActionKind.SCROLL_DOWN, "Scroll down")
+    done = CandidateAction("done", ActionKind.DONE, "Finish")
+    decision = ModelDecision(
+        "done",
+        {"condos": 0.08, "rent": 0.12, "scroll": 0.3, "done": 0.5},
+        0.1,
+        0.6,
+        0.0,
+        5,
+        100,
+    )
+
+    result = SafetyPolicy(frozenset({"example.com"})).choose(
+        decision=decision,
+        actions=(exact, partial, scroll, done),
+        snapshot=page(
+            ObservedElement("e1", "button", "Condos for rent", "button"),
+            ObservedElement("e2", "button", "Rent", "button"),
+        ),
+        history=(),
+    )
+
+    assert result.executed_action == "condos"
+    assert result.intervened
+    assert "deterministic goal progress" in result.reason
+
+
+def test_deterministic_progress_precedes_unrelated_model_proposal():
+    unrelated = CandidateAction("click_logo", ActionKind.CLICK, "Open logo", "e1")
+    scroll = CandidateAction(
+        "scroll_down",
+        ActionKind.SCROLL_DOWN,
+        "Reveal unexplored content",
+        goal_match=True,
+    )
+    decision = ModelDecision(
+        "click_logo",
+        {"click_logo": 0.8, "scroll_down": 0.2},
+        0.8,
+        0.1,
+        0.0,
+        1.0,
+        1,
+    )
+
+    result = SafetyPolicy(frozenset({"example.com"})).choose(
+        decision=decision,
+        actions=(unrelated, scroll),
+        snapshot=page(ObservedElement("e1", "link", "Logo", "a")),
+        history=(),
+    )
+
+    assert result.executed_action == "scroll_down"
+    assert result.intervened
