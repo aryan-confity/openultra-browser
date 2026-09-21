@@ -6,11 +6,13 @@ import json
 import re
 import sys
 import time
+from dataclasses import replace
+from urllib.parse import urlparse
 
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
-from .models import ActionKind, BrowserSnapshot, CandidateAction
+from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedTab
 from .observation import OBSERVE_SCRIPT, decode_observation
 
 
@@ -20,6 +22,11 @@ class ExecutionUncertain(RuntimeError):
 
 class StalePage(RuntimeError):
     """The observed page changed before browser input began."""
+
+
+def _is_http_url(value: str | None) -> bool:
+    parsed = urlparse(value or "")
+    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
 
 
 VALIDATE_TARGET_SCRIPT = r"""
@@ -215,8 +222,9 @@ class Browser:
         previous_session = self.session
         self.target = target
         self.session = cdp("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
-        if target not in self.targets:
-            self.targets.append(target)
+        if target in self.targets:
+            self.targets.remove(target)
+        self.targets.append(target)
         self.call(
             "Emulation.setDeviceMetricsOverride",
             width=1120,
@@ -247,17 +255,19 @@ class Browser:
     def _adopt_new_target(
         self, before_targets: set[str], *, timeout_seconds: float = 0.45
     ) -> bool:
+        started = time.monotonic()
         deadline = time.monotonic() + timeout_seconds
         while True:
             pages = self._page_targets()
-            candidates = [
+            child_targets = [
                 item
                 for target_id, item in pages.items()
                 if target_id not in before_targets
-                and (
-                    item.get("openerId") in self.targets
-                    or item.get("url") not in {"", "about:blank"}
-                )
+            ]
+            candidates = [
+                item
+                for item in child_targets
+                if _is_http_url(item.get("url"))
             ]
             if candidates:
                 target = candidates[-1]["targetId"]
@@ -272,6 +282,10 @@ class Browser:
                         pass
                     time.sleep(0.02)
                 return True
+            if timeout_seconds > 0 and child_targets and any(
+                item.get("url") in {None, "", "about:blank"} for item in child_targets
+            ):
+                deadline = max(deadline, started + 5.0)
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.02)
@@ -279,6 +293,47 @@ class Browser:
     @property
     def url(self) -> str:
         return self.evaluate("location.href")
+
+    def ensure_active_http_target(self) -> str:
+        """Return the active URL, recovering from a transient blank child target."""
+        current_url = self.url
+        if _is_http_url(current_url):
+            return current_url
+        pages = self._page_targets()
+        for target in reversed(self.targets):
+            info = pages.get(target)
+            if not info or not _is_http_url(info.get("url")):
+                continue
+            if target != self.target:
+                self._bind_target(target)
+            recovered_url = self.url
+            if _is_http_url(recovered_url):
+                return recovered_url
+        raise RuntimeError("No active HTTP(S) browser page is available for continuation")
+
+    def _observed_tabs(self) -> tuple[ObservedTab, ...]:
+        pages = self._page_targets()
+        tabs = []
+        for target_id in self.targets:
+            info = pages.get(target_id)
+            if not info or not _is_http_url(info.get("url")):
+                continue
+            tabs.append(
+                ObservedTab(
+                    target_id=target_id,
+                    title=str(info.get("title") or info.get("url") or "Untitled page"),
+                    url=str(info["url"]),
+                    active=target_id == self.target,
+                )
+            )
+        return tuple(tabs)
+
+    def _can_go_back(self, fallback: bool) -> bool:
+        try:
+            history = self.call("Page.getNavigationHistory")
+            return int(history.get("currentIndex", 0)) > 0
+        except (RuntimeError, TypeError, ValueError):
+            return fallback
 
     def call(self, method: str, **params):
         return cdp(method, session_id=self.session, **params)
@@ -295,10 +350,16 @@ class Browser:
         return result.get("result", {}).get("value")
 
     def observe(self) -> BrowserSnapshot:
+        self.ensure_active_http_target()
         expression = f"({OBSERVE_SCRIPT})({json.dumps({'textLimit': self.text_limit})})"
         for attempt in range(10):
             try:
-                return decode_observation(self.evaluate(expression))
+                snapshot = decode_observation(self.evaluate(expression))
+                return replace(
+                    snapshot,
+                    can_go_back=self._can_go_back(snapshot.can_go_back),
+                    tabs=self._observed_tabs(),
+                )
             except RuntimeError:
                 if attempt == 9:
                     raise
@@ -323,6 +384,21 @@ class Browser:
         )
         if before_url != snapshot.url:
             raise StalePage("Page navigated after observation; refusing a stale action")
+        if action.kind == ActionKind.SWITCH_TAB:
+            pages = self._page_targets()
+            target_id = action.browser_target_id
+            target = pages.get(target_id or "")
+            if (
+                not target_id
+                or target_id not in self.targets
+                or not target
+                or not _is_http_url(target.get("url"))
+            ):
+                raise StalePage("The selected browser tab is no longer available")
+            self._bind_target(target_id)
+            self._wait_for_semantic_quiet(quiet_ms=125, timeout_ms=1_500)
+            self.last_action_evidence = "Focused the selected existing browser tab"
+            return True
         if action.kind == ActionKind.SCROLL_DOWN:
             self.call(
                 "Input.dispatchMouseEvent",

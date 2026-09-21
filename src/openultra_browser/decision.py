@@ -23,6 +23,7 @@ OPERATION_BY_KIND = {
     "scroll_up": "SCROLL_UP",
     "scroll_down": "SCROLL_DOWN",
     "back": "BACK",
+    "switch_tab": "SWITCH_TAB",
     "wait": "WAIT",
     "done": "DONE",
     "blocked": "BLOCKED",
@@ -36,6 +37,7 @@ OPERATION_DESCRIPTIONS = {
     "SCROLL_UP": "Scroll upward to inspect earlier visible content.",
     "SCROLL_DOWN": "Scroll downward to reveal more content.",
     "BACK": "Return to the previous browser history entry.",
+    "SWITCH_TAB": "Focus one already-open browser tab by its observed title and URL.",
     "WAIT": "Wait briefly only when useful content is still loading.",
     "DONE": "Finish because every requirement is visibly satisfied.",
     "BLOCKED": "Stop because no supported observed action can make progress.",
@@ -296,7 +298,8 @@ class OpenUltraDecisionEngine:
                     "true": "The resulting page state or verified change proves the required result.",
                 },
             }
-        for operation in ("CLICK", "TYPE_TEXT", "SUBMIT", "SELECT"):
+        targeted_operations = ("CLICK", "TYPE_TEXT", "SUBMIT", "SELECT", "SWITCH_TAB")
+        for operation in targeted_operations:
             candidates = grouped.get(operation)
             if candidates:
                 questions[f"{operation.lower()}_target"] = {
@@ -322,7 +325,7 @@ class OpenUltraDecisionEngine:
         selected_target_probabilities: dict[str, float] = {}
         proposed_action = ""
         for operation, candidates in grouped.items():
-            if operation in {"CLICK", "TYPE_TEXT", "SUBMIT", "SELECT"}:
+            if operation in targeted_operations:
                 answer = answers[f"{operation.lower()}_target"]
                 expected = {action.action_id for action in candidates}
                 target_probabilities = _validate_answer(answer, expected)

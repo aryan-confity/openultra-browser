@@ -358,6 +358,13 @@ class InteractiveAgent:
             "fresh": bool(screenshot),
         }
 
+    def continuation_url(self) -> str:
+        """Resolve a valid owned page for a follow-up task without replacing browser state."""
+        recover = getattr(self.browser, "ensure_active_http_target", None)
+        if callable(recover):
+            return str(recover())
+        return self.snapshot.url
+
     def retask(self, config: RunConfig) -> dict[str, Any]:
         """Start a new task state while preserving the current browser target."""
         snapshot = self.browser.observe()
@@ -418,6 +425,14 @@ class InteractiveAgent:
             }
             for item in self.actions
         ]
+        tabs = [
+            {
+                "title": tab.title,
+                "url": tab.url,
+                "active": tab.active,
+            }
+            for tab in self.snapshot.tabs
+        ]
         return {
             "status": self.status,
             "reason": self.reason,
@@ -431,6 +446,7 @@ class InteractiveAgent:
                 "width": 1120,
                 "height": 780,
                 "elements": elements,
+                "tabs": tabs,
             },
             "actions": actions,
             "decision": decision,

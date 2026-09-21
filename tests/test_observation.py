@@ -3,6 +3,7 @@ from openultra_browser.models import (
     BrowserSnapshot,
     ObservedElement,
     ObservedOption,
+    ObservedTab,
 )
 from openultra_browser.observation import OBSERVE_SCRIPT, build_actions
 
@@ -344,6 +345,60 @@ def test_candidate_count_is_bounded():
     elements = [ObservedElement(f"e{i}", "button", f"Button {i}", "button") for i in range(50)]
     result = build_actions(snapshot(*elements), "Click a button", {}, 12, False)
     assert len(result) == 12
+
+
+def test_named_open_tab_is_a_direct_typed_target():
+    current = BrowserSnapshot(
+        url="https://accounts.google.com/signin",
+        title="Sign in",
+        visible_text="Sign in",
+        elements=(),
+        tabs=(
+            ObservedTab("youtube", "YouTube", "https://www.youtube.com/results", False),
+            ObservedTab("signin", "Sign in", "https://accounts.google.com/signin", True),
+        ),
+    )
+
+    result = build_actions(current, "Switch to the YouTube tab", {}, 8, False)
+
+    assert [action.kind for action in result] == [ActionKind.SWITCH_TAB]
+    assert result[0].browser_target_id == "youtube"
+    assert result[0].goal_match
+
+
+def test_go_back_uses_previous_tab_when_current_tab_has_no_history():
+    current = BrowserSnapshot(
+        url="https://accounts.google.com/signin",
+        title="Sign in",
+        visible_text="Sign in",
+        elements=(),
+        can_go_back=False,
+        tabs=(
+            ObservedTab("flights", "Google Flights", "https://google.com/travel/flights"),
+            ObservedTab("signin", "Sign in", "https://accounts.google.com/signin", True),
+        ),
+    )
+
+    result = build_actions(current, "Go back", {}, 8, False)
+
+    assert [action.kind for action in result] == [ActionKind.SWITCH_TAB]
+    assert result[0].browser_target_id == "flights"
+    assert result[0].goal_match
+
+
+def test_go_back_marks_browser_history_as_direct_progress():
+    current = BrowserSnapshot(
+        url="https://example.com/details",
+        title="Details",
+        visible_text="Details",
+        elements=(),
+        can_go_back=True,
+    )
+
+    result = build_actions(current, "Go back", {}, 8, False)
+
+    back = next(action for action in result if action.kind == ActionKind.BACK)
+    assert back.goal_match
 
 
 def test_scroll_controls_match_observed_page_capability():

@@ -96,7 +96,12 @@ class InspectorController:
     def retask(self, body: dict) -> dict:
         if self.agent is None:
             raise ValueError("Start a task first")
-        current_url = self.agent.state()["page"]["url"]
+        continuation_url = getattr(self.agent, "continuation_url", None)
+        current_url = (
+            continuation_url()
+            if callable(continuation_url)
+            else self.agent.state()["page"]["url"]
+        )
         config = self._config(body, current_url=current_url)
         state = self.agent.retask(config)
         self.run_id = secrets.token_urlsafe(12)

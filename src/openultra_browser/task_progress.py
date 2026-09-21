@@ -210,7 +210,18 @@ def login_blocks_progress(
         ActionKind.FILL,
         ActionKind.PRESS_ENTER,
         ActionKind.SELECT,
+        ActionKind.BACK,
+        ActionKind.SWITCH_TAB,
     }
+    proposed = next(
+        (action for action in actions if action.action_id == decision.proposed_action), None
+    )
+    if (
+        proposed
+        and proposed.kind in {ActionKind.BACK, ActionKind.SWITCH_TAB}
+        and decision.confidence >= 0.45
+    ):
+        return False
     return not any(
         action.goal_match and action.kind in semantic_kinds for action in actions
     )

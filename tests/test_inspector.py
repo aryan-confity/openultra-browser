@@ -160,6 +160,36 @@ def test_retask_rotates_run_identity_without_replacing_the_agent(monkeypatch):
     assert agent.config.start_url == "https://example.com/current"
 
 
+def test_retask_recovers_the_browser_owned_http_page_before_config_validation(monkeypatch):
+    class FakeInteractiveAgent:
+        def __init__(self, config, *, decision_engine):
+            self.config = config
+
+        def state(self):
+            return {"status": "ready", "page": {"url": "about:blank"}}
+
+        def continuation_url(self):
+            return "https://google.com/travel/flights"
+
+        def retask(self, config):
+            self.config = config
+            return self.state()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("openultra_browser.inspector.InteractiveAgent", FakeInteractiveAgent)
+    monkeypatch.setattr(
+        "openultra_browser.inspector.OpenUltraDecisionEngine", lambda _model: object()
+    )
+    controller = InspectorController("model")
+    controller.reset({"goal": "Open https://example.com"})
+
+    controller.retask({"goal": "Go back"})
+
+    assert controller.agent.config.start_url == "https://google.com/travel/flights"
+
+
 def test_voice_plan_requires_model_and_deterministic_agreement():
     class VoiceEngine:
         def classify_voice_command(self, transcript, candidate):

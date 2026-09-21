@@ -106,6 +106,61 @@ def test_operation_and_compatible_target_share_one_local_batch():
     assert "control state" in step_question["instructions"]
 
 
+def test_switch_tab_uses_a_typed_target_in_the_same_batch():
+    class TabAgent:
+        def predict(self, _state, questions):
+            operation_ids = list(questions["operation"]["criteria"])
+            target_ids = list(questions["switch_tab_target"]["criteria"])
+            return {
+                "answers": {
+                    "operation": {
+                        "choice": "SWITCH_TAB",
+                        "confidence": 0.94,
+                        "probabilities": {
+                            key: float(key == "SWITCH_TAB") for key in operation_ids
+                        },
+                    },
+                    "switch_tab_target": {
+                        "choice": target_ids[0],
+                        "confidence": 0.92,
+                        "probabilities": {
+                            key: float(key == target_ids[0]) for key in target_ids
+                        },
+                    },
+                    "completion": {"noul": 0.02},
+                    "completion_change": {"noul": 0.02},
+                    "stuck": {"noul": 0.01},
+                    "error": {"noul": 0.01},
+                    "loading": {"noul": 0.01},
+                    "login": {"noul": 0.95},
+                    "step_completion": {"noul": 0.01},
+                    "step_completion_change": {"noul": 0.01},
+                },
+                "usage": {"input_tokens": 40},
+            }
+
+    engine = OpenUltraDecisionEngine("unused", agent=TabAgent())
+    action = CandidateAction(
+        "switch_tab_youtube",
+        ActionKind.SWITCH_TAB,
+        "Focus browser tab | YouTube",
+        browser_target_id="youtube",
+        goal_match=True,
+    )
+
+    result = engine.decide(
+        goal="Switch to the YouTube tab",
+        current_step="Switch to the YouTube tab",
+        snapshot=BrowserSnapshot("https://accounts.google.com", "Sign in", "Sign in", ()),
+        actions=(action,),
+        history=(),
+    )
+
+    assert result.operation == "SWITCH_TAB"
+    assert result.proposed_action == "switch_tab_youtube"
+    assert result.target_probabilities == {"switch_tab_youtube": 1.0}
+
+
 def test_bounded_session_context_and_correction_share_the_main_batch():
     class ContextAgent(FakeAgent):
         def predict(self, state, questions):

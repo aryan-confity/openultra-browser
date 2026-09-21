@@ -18,6 +18,7 @@ class ActionKind(StrEnum):
     SCROLL_UP = "scroll_up"
     SCROLL_DOWN = "scroll_down"
     BACK = "back"
+    SWITCH_TAB = "switch_tab"
     WAIT = "wait"
     DONE = "done"
     BLOCKED = "blocked"
@@ -105,6 +106,14 @@ class ObservedElement:
 
 
 @dataclass(frozen=True)
+class ObservedTab:
+    target_id: str
+    title: str
+    url: str
+    active: bool = False
+
+
+@dataclass(frozen=True)
 class BrowserSnapshot:
     url: str
     title: str
@@ -114,6 +123,7 @@ class BrowserSnapshot:
     can_scroll_down: bool = False
     can_go_back: bool = False
     alerts: tuple[str, ...] = ()
+    tabs: tuple[ObservedTab, ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -122,6 +132,7 @@ class BrowserSnapshot:
             "title": self.title,
             "text": self.visible_text,
             "elements": [asdict(element) for element in self.elements],
+            "tabs": [asdict(tab) for tab in self.tabs],
         }
         return hashlib.sha256(
             json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()
@@ -138,6 +149,7 @@ class CandidateAction:
     option: str | None = None
     option_value: str | None = None
     target_url: str | None = None
+    browser_target_id: str | None = None
     goal_match: bool = False
 
 

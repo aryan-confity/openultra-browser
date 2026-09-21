@@ -703,6 +703,46 @@ def build_actions(
                 )
             ]
 
+    goal_tokens = _tokens(goal)
+    tab_intent = bool(
+        goal_tokens & {"tab", "tabs"}
+        and goal_tokens & {"back", "change", "focus", "open", "return", "switch"}
+    )
+    back_requested = bool(
+        re.search(r"\b(?:go|switch|return)\s+back\b", goal, re.IGNORECASE)
+    )
+    back_to_tab = not snapshot.can_go_back and back_requested
+    inactive_tabs = [tab for tab in snapshot.tabs if not tab.active]
+    previous_tab_id = inactive_tabs[-1].target_id if inactive_tabs else None
+    if tab_intent or back_to_tab:
+        for tab in inactive_tabs:
+            tab_terms = _tokens(f"{tab.title} {urlparse(tab.url).hostname or ''}")
+            matches = sorted(_goal_terms(goal) & tab_terms)
+            is_previous = back_to_tab and tab.target_id == previous_tab_id
+            goal_match = bool(matches) or is_previous
+            facts = (
+                " Direct goal match: YES. "
+                + (
+                    "This is the most recently active prior tab."
+                    if is_previous
+                    else f"Matched terms: {', '.join(matches)}."
+                )
+                if goal_match
+                else " Direct goal match: no."
+            )
+            ranked.append(
+                (
+                    80 + len(matches) * 5 + (20 if is_previous else 0),
+                    CandidateAction(
+                        action_id=f"switch_tab_{tab.target_id}",
+                        kind=ActionKind.SWITCH_TAB,
+                        description=f"Focus browser tab | {tab.title} | {tab.url}.{facts}",
+                        browser_target_id=tab.target_id,
+                        goal_match=goal_match,
+                    ),
+                )
+            )
+
     transition_pending = bool(
         preferred_domains and urlparse(snapshot.url).hostname not in preferred_domains
     )
@@ -759,7 +799,18 @@ def build_actions(
             CandidateAction("scroll_up", ActionKind.SCROLL_UP, "Scroll up to earlier content")
         )
     if snapshot.can_go_back and not calendar_transition_pending:
-        controls.append(CandidateAction("back", ActionKind.BACK, "Return to the previous page"))
+        controls.append(
+            CandidateAction(
+                "back",
+                ActionKind.BACK,
+                (
+                    "Return to the previous page. Direct goal match: YES."
+                    if back_requested
+                    else "Return to the previous page"
+                ),
+                goal_match=back_requested,
+            )
+        )
     if not calendar_transition_pending and (
         visibly_busy or (not has_direct_target and not snapshot.can_scroll_down)
     ):

@@ -236,6 +236,41 @@ def test_login_blocks_when_no_direct_semantic_action_remains():
     assert login_blocks_progress(model, (scroll,))
 
 
+def test_login_page_does_not_block_a_confident_back_instruction():
+    back = CandidateAction("back", ActionKind.BACK, "Return to the previous page")
+    model = replace(
+        decision(0.0),
+        proposed_action="back",
+        probabilities={"back": 0.9},
+        confidence=0.9,
+        login_probability=0.95,
+    )
+
+    assert not login_blocks_progress(model, (back,))
+
+
+def test_login_page_does_not_block_a_confident_tab_escape():
+    switch = CandidateAction(
+        "switch_tab_previous",
+        ActionKind.SWITCH_TAB,
+        "Return to the previous browser tab",
+        browser_target_id="previous",
+        goal_match=True,
+    )
+    model = ModelDecision(
+        proposed_action="switch_tab_previous",
+        probabilities={"switch_tab_previous": 1.0},
+        confidence=0.9,
+        goal_probability=0.0,
+        stuck_probability=0.0,
+        inference_ms=1.0,
+        input_tokens=10,
+        login_probability=0.99,
+    )
+
+    assert not login_blocks_progress(model, (switch,))
+
+
 def test_model_error_does_not_block_without_browser_alert_evidence():
     model = replace(decision(0.0), error_probability=0.9)
     page = snapshot("https://example.com")
