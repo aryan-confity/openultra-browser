@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from urllib.parse import urlparse
 
 from .models import (
+    ActionContext,
     ActionKind,
     BrowserSnapshot,
     CandidateAction,
@@ -71,12 +72,18 @@ class SafetyPolicy:
         actions: Sequence[CandidateAction],
         snapshot: BrowserSnapshot,
         history: Sequence[StepRecord],
+        context_actions: Sequence[ActionContext] = (),
     ) -> PolicyDecision:
         by_id = {action.action_id: action for action in actions}
         elements = {element.element_id: element for element in snapshot.elements}
         recent_noops = {
             row.executed_action for row in history[-3:] if row.executed_action and not row.changed
         }
+        correction_target = (
+            context_actions[-1].action_id
+            if context_actions and decision.correction_probability >= 0.6
+            else None
+        )
         fallback = sorted(
             decision.probabilities,
             key=lambda action_id: decision.probabilities[action_id],
@@ -109,8 +116,7 @@ class SafetyPolicy:
                 rejected.append(f"{action_id}: no observable task progress has occurred")
                 continue
             if action.kind == ActionKind.DONE and any(
-                candidate.kind != ActionKind.DONE and candidate.goal_match
-                for candidate in actions
+                candidate.kind != ActionKind.DONE and candidate.goal_match for candidate in actions
             ):
                 rejected.append(f"{action_id}: a visible goal-progress action remains")
                 continue
@@ -125,6 +131,13 @@ class SafetyPolicy:
                 continue
             if action.kind == ActionKind.BLOCKED and decision.stuck_probability < 0.75:
                 rejected.append(f"{action_id}: independent stuck confidence is below threshold")
+                continue
+            if (
+                correction_target
+                and action_id == correction_target
+                and any(candidate.action_id != correction_target for candidate in actions)
+            ):
+                rejected.append(f"{action_id}: the updated task rejects the previous target")
                 continue
             reason = self._reason_blocked(action, snapshot, elements)
             if reason:

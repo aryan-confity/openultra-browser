@@ -27,3 +27,11 @@ NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPO
 NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
 OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Jev Voice Browser
+Copyright (c) 2026 Moritz Kremb
+Licensed under the MIT License.
+
+OpenUltra's bounded prior-page/action context and correction-aware target policy are independent
+Python adaptations of patterns demonstrated by the Jev Voice Browser reference implementation.
+The same MIT permission and warranty terms reproduced above apply.

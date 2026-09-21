@@ -28,6 +28,12 @@ the current snapshot fingerprint without mutating the page. `act` consumes that 
 input begins and refuses a different fingerprint. Automatic mode calls those same methods; it is not
 a second execution path.
 
+Task continuation keeps a separate session context containing at most three code-owned action
+outcomes and the page before the latest navigation. That context lets the same batch resolve
+references and corrections such as choosing another result. It is never merged into the new run's
+history, so prior actions cannot satisfy completion checks, suppress repeat detection, or consume
+the new run's limits. Prepared values are excluded from this context.
+
 ## Observation
 
 One browser evaluation stamps visible interactive nodes with ephemeral IDs and returns their role,
@@ -64,7 +70,9 @@ Before execution, deterministic code:
 3. restricts navigation to explicit domains;
 4. blocks destructive and financial actions by default;
 5. avoids repeating recent actions that produced no observable change;
-6. selects the next-highest safe probability when intervention is required.
+6. excludes the previous target when the model independently identifies the updated task as a
+   correction;
+7. selects the next-highest safe probability when intervention is required.
 
 The executor resolves only the ephemeral observed ID. Model output never becomes a selector or script.
 If the page becomes stale before input starts, the decision is discarded and the next iteration

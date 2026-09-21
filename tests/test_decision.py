@@ -1,9 +1,11 @@
 from openultra_browser.decision import OpenUltraDecisionEngine
 from openultra_browser.models import (
+    ActionContext,
     ActionKind,
     BrowserSnapshot,
     CandidateAction,
     ObservedElement,
+    PageContext,
     StepRecord,
 )
 
@@ -102,6 +104,64 @@ def test_operation_and_compatible_target_share_one_local_batch():
     step_question = fake.calls[0][1]["step_completion"]
     assert "current required step" in step_question["instructions"]
     assert "control state" in step_question["instructions"]
+
+
+def test_bounded_session_context_and_correction_share_the_main_batch():
+    class ContextAgent(FakeAgent):
+        def predict(self, state, questions):
+            result = super().predict(state, questions)
+            result["answers"]["correction"] = {"noul": 0.86}
+            return result
+
+    fake = ContextAgent()
+    engine = OpenUltraDecisionEngine("unused", agent=fake)
+    snapshot = BrowserSnapshot(
+        "https://example.com/details",
+        "Wrong result",
+        "Wrong result details",
+        (
+            ObservedElement("e1", "link", "First result", "a"),
+            ObservedElement("e2", "link", "Second result", "a"),
+        ),
+        can_go_back=True,
+        can_scroll_down=True,
+    )
+    actions = (
+        CandidateAction("click_e1", ActionKind.CLICK, "Open First result", "e1"),
+        CandidateAction("click_e2", ActionKind.CLICK, "Open Second result", "e2"),
+        CandidateAction("scroll_down", ActionKind.SCROLL_DOWN, "Scroll down"),
+    )
+    context = tuple(
+        ActionContext(
+            action_id=f"click_e{index}",
+            action_kind="click",
+            description=f"Open result {index}",
+            source_url="https://example.com/results",
+            result_url=f"https://example.com/details/{index}",
+            outcome=f"URL changed to details/{index}",
+            succeeded=True,
+            at_epoch_ms=index,
+        )
+        for index in range(1, 5)
+    )
+
+    result = engine.decide(
+        goal="Not that result. Open the other one",
+        current_step="Open the other result",
+        snapshot=snapshot,
+        actions=actions,
+        history=(),
+        context_actions=context,
+        previous_page=PageContext("https://example.com/results", "Results"),
+    )
+
+    state, questions = fake.calls[0]
+    assert "Previous page before the latest navigation: Results" in state
+    assert "Open result 1" not in state
+    assert "Open result 2" in state
+    assert "Open result 4" in state
+    assert "correction" in questions
+    assert result.correction_probability == 0.86
 
 
 def test_completion_confirmation_is_a_focused_boolean_check():

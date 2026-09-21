@@ -1,4 +1,5 @@
 from openultra_browser.models import (
+    ActionContext,
     ActionKind,
     BrowserSnapshot,
     CandidateAction,
@@ -40,9 +41,7 @@ def test_task_first_policy_allows_observed_https_navigation_only():
         "e0",
         target_url="https://docs.example.test/guide",
     )
-    decision = SafetyPolicy(
-        frozenset({"example.com"}), allow_external_navigation=True
-    ).choose(
+    decision = SafetyPolicy(frozenset({"example.com"}), allow_external_navigation=True).choose(
         decision=model("external", {"external": 1.0}),
         actions=(external,),
         snapshot=page(ObservedElement("e0", "link", "Documentation", "a")),
@@ -56,9 +55,7 @@ def test_task_first_policy_still_rejects_non_http_navigation():
     external = CandidateAction(
         "external", ActionKind.CLICK, "Open mail", "e0", target_url="mailto:test@example.com"
     )
-    decision = SafetyPolicy(
-        frozenset({"example.com"}), allow_external_navigation=True
-    ).choose(
+    decision = SafetyPolicy(frozenset({"example.com"}), allow_external_navigation=True).choose(
         decision=model("external", {"external": 1.0}),
         actions=(external,),
         snapshot=page(ObservedElement("e0", "link", "Mail", "a")),
@@ -138,12 +135,8 @@ def test_done_requires_independent_completion_confidence():
 
 def test_done_requires_observed_progress_and_no_visible_goal_action():
     done = CandidateAction("done", ActionKind.DONE, "Finish")
-    click = CandidateAction(
-        "click", ActionKind.CLICK, "Open final result", "e0", goal_match=True
-    )
-    confident_done = ModelDecision(
-        "done", {"done": 0.9, "click": 0.1}, 0.9, 0.95, 0.0, 5, 100
-    )
+    click = CandidateAction("click", ActionKind.CLICK, "Open final result", "e0", goal_match=True)
+    confident_done = ModelDecision("done", {"done": 0.9, "click": 0.1}, 0.9, 0.95, 0.0, 5, 100)
     policy = SafetyPolicy(frozenset({"example.com"}))
 
     no_progress = policy.choose(
@@ -182,9 +175,7 @@ def test_rejected_done_falls_back_to_first_ranked_direct_progress_target():
     exact = CandidateAction(
         "condos", ActionKind.CLICK, "Activate Condos for rent", "e1", goal_match=True
     )
-    partial = CandidateAction(
-        "rent", ActionKind.CLICK, "Activate Rent", "e2", goal_match=True
-    )
+    partial = CandidateAction("rent", ActionKind.CLICK, "Activate Rent", "e2", goal_match=True)
     scroll = CandidateAction("scroll", ActionKind.SCROLL_DOWN, "Scroll down")
     done = CandidateAction("done", ActionKind.DONE, "Finish")
     decision = ModelDecision(
@@ -239,3 +230,48 @@ def test_deterministic_progress_precedes_unrelated_model_proposal():
 
     assert result.executed_action == "scroll_down"
     assert result.intervened
+
+
+def test_confirmed_correction_excludes_the_previous_target():
+    previous = CandidateAction(
+        "click_first", ActionKind.CLICK, "Open First result", "e1", goal_match=True
+    )
+    alternative = CandidateAction(
+        "click_second", ActionKind.CLICK, "Open Second result", "e2", goal_match=True
+    )
+    decision = ModelDecision(
+        "click_first",
+        {"click_first": 0.6, "click_second": 0.4},
+        0.9,
+        0.1,
+        0.1,
+        5,
+        100,
+        correction_probability=0.9,
+    )
+    context = (
+        ActionContext(
+            action_id="click_first",
+            action_kind="click",
+            description="Open First result",
+            source_url="https://example.com/results",
+            result_url="https://example.com/results",
+            outcome="No page change",
+            succeeded=True,
+            at_epoch_ms=1,
+        ),
+    )
+
+    result = SafetyPolicy(frozenset({"example.com"})).choose(
+        decision=decision,
+        actions=(previous, alternative),
+        snapshot=page(
+            ObservedElement("e1", "link", "First result", "a"),
+            ObservedElement("e2", "link", "Second result", "a"),
+        ),
+        history=(),
+        context_actions=context,
+    )
+
+    assert result.executed_action == "click_second"
+    assert "rejects the previous target" in result.reason

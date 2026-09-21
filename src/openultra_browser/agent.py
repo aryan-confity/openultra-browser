@@ -8,7 +8,7 @@ from collections.abc import Callable
 from .browser import Browser, ExecutionUncertain, StalePage
 from .config import RunConfig
 from .decision import OpenUltraDecisionEngine
-from .models import ActionKind, RunResult, StepRecord
+from .models import ActionContext, ActionKind, PageContext, RunResult, StepRecord
 from .observation import build_actions
 from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
@@ -32,7 +32,9 @@ class BrowserAgent:
         on_step: Callable[[StepRecord], None] | None = None,
     ) -> None:
         self.config = config
-        self.engine = decision_engine or OpenUltraDecisionEngine(config.model, optimize=config.optimize)
+        self.engine = decision_engine or OpenUltraDecisionEngine(
+            config.model, optimize=config.optimize
+        )
         self.browser_factory = browser_factory
         self.policy = SafetyPolicy(
             config.effective_allowed_domains,
@@ -45,6 +47,8 @@ class BrowserAgent:
         started = time.perf_counter()
         deadline = started + self.config.max_seconds
         history: list[StepRecord] = []
+        context_actions: list[ActionContext] = []
+        previous_page: PageContext | None = None
         status = "max_steps"
         reason = f"Reached the {self.config.max_steps}-step limit"
         final_url = self.config.start_url
@@ -100,14 +104,14 @@ class BrowserAgent:
                         snapshot=snapshot,
                         actions=actions,
                         history=history,
+                        context_actions=context_actions,
+                        previous_page=previous_page,
                     )
                     if history and error_blocks_progress(decision, snapshot, actions):
                         status = "error"
                         reason = "The current page visibly rejects or errors after the last action"
                         break
-                    disposition = step_completion_disposition(
-                        progress, decision, history
-                    )
+                    disposition = step_completion_disposition(progress, decision, history)
                     step_verified = disposition == "verified"
                     confirm_step = getattr(self.engine, "confirm_step_completion", None)
                     if (
@@ -125,15 +129,11 @@ class BrowserAgent:
                             >= 0.45
                         )
                     if progress.current_step and step_verified:
-                        progress.advance_current_step(
-                            snapshot, action_count=len(history)
-                        )
+                        progress.advance_current_step(snapshot, action_count=len(history))
                         continue
                     if login_blocks_progress(decision, actions):
                         status = "needs_login"
-                        reason = (
-                            "The current outcome requires authentication in the isolated browser profile"
-                        )
+                        reason = "The current outcome requires authentication in the isolated browser profile"
                         break
                     break
                 if status in {"error", "needs_login"}:
@@ -143,6 +143,7 @@ class BrowserAgent:
                     actions=actions,
                     snapshot=snapshot,
                     history=history,
+                    context_actions=context_actions,
                 )
                 by_id = {action.action_id: action for action in actions}
                 chosen = by_id.get(policy.executed_action or "")
@@ -191,6 +192,7 @@ class BrowserAgent:
                     self.on_step(record)
                     break
 
+                result_snapshot = snapshot
                 try:
                     transport_verified = bool(
                         browser.act(chosen, snapshot, self.config.prepared_inputs)
@@ -199,6 +201,7 @@ class BrowserAgent:
                     if evidence:
                         record.description += f" Execution evidence: {evidence}."
                     next_snapshot = browser.observe()
+                    result_snapshot = next_snapshot
                     record.change_summary = summarize_page_change(snapshot, next_snapshot)
                     record.changed = (
                         next_snapshot.fingerprint != snapshot.fingerprint or transport_verified
@@ -214,6 +217,30 @@ class BrowserAgent:
                     record.action_error = f"{type(error).__name__}: {error}"
                 record.elapsed_ms = (time.perf_counter() - step_started) * 1_000
                 history.append(record)
+                if record.executed_action:
+                    if result_snapshot.url != snapshot.url:
+                        previous_page = PageContext(url=snapshot.url, title=snapshot.title)
+                    context_actions.append(
+                        ActionContext(
+                            action_id=record.executed_action,
+                            action_kind=record.action_kind,
+                            description=record.description,
+                            source_url=snapshot.url,
+                            result_url=result_snapshot.url,
+                            outcome=(
+                                record.action_error
+                                or record.change_summary
+                                or (
+                                    "Completed with no verified page change"
+                                    if record.changed
+                                    else "No page change"
+                                )
+                            ),
+                            succeeded=not bool(record.action_error),
+                            at_epoch_ms=round(time.time() * 1_000),
+                        )
+                    )
+                    del context_actions[:-3]
                 self.on_step(record)
                 if status == "needs_verification":
                     break

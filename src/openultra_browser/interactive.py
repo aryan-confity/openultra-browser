@@ -9,7 +9,15 @@ from typing import Any
 from .browser import Browser, ExecutionUncertain, StalePage
 from .config import RunConfig
 from .decision import OpenUltraDecisionEngine
-from .models import ActionKind, BrowserSnapshot, CandidateAction, ModelDecision, StepRecord
+from .models import (
+    ActionContext,
+    ActionKind,
+    BrowserSnapshot,
+    CandidateAction,
+    ModelDecision,
+    PageContext,
+    StepRecord,
+)
 from .observation import build_actions
 from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
@@ -31,6 +39,7 @@ TERMINAL_STATUSES = {
     "stuck",
     "error",
 }
+MAX_CONTEXT_ACTIONS = 3
 
 
 class InteractiveAgent:
@@ -44,7 +53,9 @@ class InteractiveAgent:
         browser_factory=Browser,
     ) -> None:
         self.config = config
-        self.engine = decision_engine or OpenUltraDecisionEngine(config.model, optimize=config.optimize)
+        self.engine = decision_engine or OpenUltraDecisionEngine(
+            config.model, optimize=config.optimize
+        )
         self.policy = SafetyPolicy(
             config.effective_allowed_domains,
             allow_risky=config.allow_risky,
@@ -53,6 +64,8 @@ class InteractiveAgent:
         self.started_at_epoch_ms = round(time.time() * 1_000)
         self.started_at = time.perf_counter()
         self.history: list[StepRecord] = []
+        self.context_actions: list[ActionContext] = []
+        self.previous_page: PageContext | None = None
         self.decision: ModelDecision | None = None
         self.policy_result = None
         self.actions: tuple[CandidateAction, ...] = ()
@@ -62,9 +75,7 @@ class InteractiveAgent:
         self.browser = browser_factory(config.start_url, text_limit=config.visible_text_chars)
         try:
             self.snapshot = self.browser.observe()
-            self.progress.sync_visible_state(
-                self.snapshot, action_count=len(self.history)
-            )
+            self.progress.sync_visible_state(self.snapshot, action_count=len(self.history))
             self.screenshot = self._screenshot()
             self._refresh()
         except BaseException:
@@ -105,9 +116,7 @@ class InteractiveAgent:
         return True, "Verified " + " and ".join(checks)
 
     def _refresh(self) -> None:
-        self.progress.sync_visible_state(
-            self.snapshot, action_count=len(self.history)
-        )
+        self.progress.sync_visible_state(self.snapshot, action_count=len(self.history))
         verified, reason = self._success(self.snapshot)
         if verified:
             self.status, self.reason, self.actions = "completed", reason, ()
@@ -152,24 +161,18 @@ class InteractiveAgent:
                 snapshot=self.snapshot,
                 actions=self.actions,
                 history=self.history,
+                context_actions=self.context_actions,
+                previous_page=self.previous_page,
             )
-            if self.history and error_blocks_progress(
-                self.decision, self.snapshot, self.actions
-            ):
+            if self.history and error_blocks_progress(self.decision, self.snapshot, self.actions):
                 self.status = "error"
                 self.reason = "The current page visibly rejects or errors after the last action"
                 self.actions = ()
                 return self.state()
-            disposition = step_completion_disposition(
-                self.progress, self.decision, self.history
-            )
+            disposition = step_completion_disposition(self.progress, self.decision, self.history)
             step_verified = disposition == "verified"
             confirm_step = getattr(self.engine, "confirm_step_completion", None)
-            if (
-                disposition == "confirm"
-                and self.progress.current_step
-                and callable(confirm_step)
-            ):
+            if disposition == "confirm" and self.progress.current_step and callable(confirm_step):
                 step_verified = (
                     confirm_step(
                         goal=self.config.goal,
@@ -180,9 +183,7 @@ class InteractiveAgent:
                     >= 0.45
                 )
             if self.progress.current_step and step_verified:
-                self.progress.advance_current_step(
-                    self.snapshot, action_count=len(self.history)
-                )
+                self.progress.advance_current_step(self.snapshot, action_count=len(self.history))
                 self.decision = None
                 self.policy_result = None
                 continue
@@ -199,6 +200,7 @@ class InteractiveAgent:
             actions=self.actions,
             snapshot=self.snapshot,
             history=self.history,
+            context_actions=self.context_actions,
         )
         self.status = "predicted"
         self.reason = "Choice ready for inspection or execution"
@@ -236,6 +238,7 @@ class InteractiveAgent:
             policy_reason=policy_result.reason,
         )
         step_started = time.perf_counter()
+        source_snapshot = self.snapshot
         if chosen.kind == ActionKind.DONE:
             self.history.append(record)
             confirm = getattr(self.engine, "confirm_completion", None)
@@ -255,7 +258,9 @@ class InteractiveAgent:
                 )
             else:
                 self.status = "needs_verification"
-                self.reason = "The model proposed completion without sufficient independent evidence"
+                self.reason = (
+                    "The model proposed completion without sufficient independent evidence"
+                )
             return self.state()
 
         if chosen.kind == ActionKind.BLOCKED:
@@ -294,9 +299,12 @@ class InteractiveAgent:
             self.reason = "Action failed before confirmed progress; inspect and choose again"
         record.elapsed_ms = (time.perf_counter() - step_started) * 1_000
         self.history.append(record)
+        self._remember_action(record, source_snapshot, self.snapshot)
         self.screenshot = self._screenshot()
-        if self.status == "ready" and len(self.history) >= 3 and all(
-            not row.changed and row.executed_action != "wait" for row in self.history[-3:]
+        if (
+            self.status == "ready"
+            and len(self.history) >= 3
+            and all(not row.changed and row.executed_action != "wait" for row in self.history[-3:])
         ):
             self.status = "stuck"
             self.reason = "Three consecutive actions produced no observable change"
@@ -306,6 +314,35 @@ class InteractiveAgent:
         if self.status == "ready":
             self._refresh()
         return self.state()
+
+    def _remember_action(
+        self,
+        record: StepRecord,
+        source: BrowserSnapshot,
+        result: BrowserSnapshot,
+    ) -> None:
+        if not record.executed_action:
+            return
+        if result.url != source.url:
+            self.previous_page = PageContext(url=source.url, title=source.title)
+        outcome = record.action_error or record.change_summary
+        if not outcome:
+            outcome = (
+                "Completed with no verified page change" if record.changed else "No page change"
+            )
+        self.context_actions.append(
+            ActionContext(
+                action_id=record.executed_action,
+                action_kind=record.action_kind,
+                description=record.description,
+                source_url=source.url,
+                result_url=result.url,
+                outcome=outcome,
+                succeeded=not bool(record.action_error),
+                at_epoch_ms=round(time.time() * 1_000),
+            )
+        )
+        del self.context_actions[:-MAX_CONTEXT_ACTIONS]
 
     def capture_frame(self) -> dict[str, Any]:
         """Capture pixels without observing controls or changing the decision state."""

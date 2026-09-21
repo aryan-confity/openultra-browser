@@ -54,10 +54,14 @@ class FakeBrowser:
 
 class FillEngine:
     def decide(self, *, actions, **_kwargs):
-        selected = next(action.action_id for action in actions if action.action_id.startswith("fill_"))
+        selected = next(
+            action.action_id for action in actions if action.action_id.startswith("fill_")
+        )
         return ModelDecision(
             proposed_action=selected,
-            probabilities={action.action_id: float(action.action_id == selected) for action in actions},
+            probabilities={
+                action.action_id: float(action.action_id == selected) for action in actions
+            },
             confidence=1.0,
             goal_probability=0.2,
             stuck_probability=0.0,
@@ -213,5 +217,9 @@ def test_retask_preserves_browser_and_current_page_while_resetting_run_state():
     assert state["goal"] == "Review the current result"
     assert state["page"]["url"] == "https://example.com/result"
     assert state["history"] == []
+    assert len(agent.context_actions) == 1
+    assert agent.context_actions[0].source_url == "https://example.com/search"
+    assert agent.context_actions[0].result_url == "https://example.com/result"
+    assert agent.previous_page.url == "https://example.com/search"
     assert state["elapsed_ms"] < 100
     agent.close()

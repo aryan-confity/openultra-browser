@@ -131,6 +131,7 @@ class ModelDecision:
     login_probability: float = 0.0
     step_completion_probability: float = 0.0
     step_completion_change_probability: float = 0.0
+    correction_probability: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,24 @@ class PolicyDecision:
     executed_action: str | None
     intervened: bool
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PageContext:
+    url: str
+    title: str
+
+
+@dataclass(frozen=True)
+class ActionContext:
+    action_id: str
+    action_kind: str | None
+    description: str
+    source_url: str
+    result_url: str
+    outcome: str
+    succeeded: bool
+    at_epoch_ms: int
 
 
 @dataclass

@@ -28,6 +28,8 @@ bounded typed actions ---> local MLX model ---> probabilities
 - Stale-target, cross-domain, password, upload, financial, and destructive-action guards.
 - Named prepared values for text fields; values are not placed in the model prompt.
 - Probability-aware fallback when the highest-ranked action is blocked or recently ineffective.
+- Bounded prior-page and action context for correction-aware task continuation without carrying
+  prior-run completion evidence into the new task.
 - Independent typed completion and stuck heads, optional deterministic checks, bounded execution,
   and atomic JSON traces.
 - A dedicated visible Chrome profile that isolates automation from personal browser data.
