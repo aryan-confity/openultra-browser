@@ -1,5 +1,5 @@
-from laya_browser.models import StepRecord
-from laya_browser.progress import repeats_action_cycle
+from openultra_browser.models import StepRecord
+from openultra_browser.progress import repeats_action_cycle
 
 
 def step(number, action):

@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${LAYA_BROWSER_CDP_PORT:-9333}"
+PORT="${OPENULTRA_BROWSER_CDP_PORT:-9333}"
 ENDPOINT="http://127.0.0.1:$PORT"
-PROFILE="${LAYA_BROWSER_CHROME_PROFILE:-$ROOT/.runtime/chrome-profile}"
+PROFILE="${OPENULTRA_BROWSER_CHROME_PROFILE:-$ROOT/.runtime/chrome-profile}"
 
 if curl -fsS "$ENDPOINT/json/version" >/dev/null 2>&1; then
   printf 'Chrome automation endpoint ready at %s\n' "$ENDPOINT"

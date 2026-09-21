@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from laya_browser.cli import build_parser
-from laya_browser.inspector import STATIC_ROOT, _bounded_float, _bounded_int, _bounded_text
+from openultra_browser.cli import build_parser
+from openultra_browser.inspector import STATIC_ROOT, _bounded_float, _bounded_int, _bounded_text
 
 
 def test_inspector_command_is_available():
@@ -12,20 +12,32 @@ def test_inspector_command_is_available():
     assert args.no_open is True
 
 
-def test_inspector_assets_include_task_timer_and_manual_controls():
+def test_inspector_assets_are_task_first_live_and_single_screen():
     html = (STATIC_ROOT / "inspector.html").read_text()
     script = (STATIC_ROOT / "inspector.js").read_text()
 
     assert 'id="goal"' in html
     assert 'id="timer"' in html
-    assert "Run automatically" in html
-    assert "Choose next" in html
-    assert "Execute choice" in html
+    assert 'id="decision-ms"' in html
+    assert 'id="decision-rate"' in html
+    assert "OpenUltra" in html
+    assert 'class="app-shell"' in html
+    assert "Run automatically" not in html
+    assert "Choose next" not in html
+    assert "Execute choice" not in html
     assert "requestAnimationFrame(drawTimer)" in script
+    assert 'id="start-url"' not in html
+    assert "Run constraints" not in html
+    assert 'goal: byId("goal").value' in script
+    assert 'fetch("/api/frame"' in script
+    assert "setInterval(refreshFrame, 400)" in script
+    assert "requestAnimationFrame(() => requestAnimationFrame(resolve))" in script
+    assert 'await call("reset"' in script
+    assert "await runAutomatically()" in script
 
 
 def test_inspector_static_assets_are_packaged_below_the_module():
-    assert STATIC_ROOT == Path(__file__).parents[1] / "src/laya_browser/static"
+    assert STATIC_ROOT == Path(__file__).parents[1] / "src/openultra_browser/static"
     assert {path.name for path in STATIC_ROOT.iterdir()} == {
         "inspector.css",
         "inspector.html",

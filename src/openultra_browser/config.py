@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 
 def default_model_path() -> str:
-    configured = os.environ.get("LAYA_MODEL_PATH", "").strip()
+    configured = os.environ.get("OPENULTRA_MODEL_PATH", "").strip()
     if configured:
         return configured
     sibling = Path(__file__).resolve().parents[3] / "laya-mlx/models/hub/laya-mlx"
@@ -35,6 +35,7 @@ class RunConfig:
     visible_text_chars: int = 2_000
     keep_open_seconds: float = 0
     allow_risky: bool = False
+    allow_external_navigation: bool = False
     optimize: bool = False
     trace_path: Path | None = None
 

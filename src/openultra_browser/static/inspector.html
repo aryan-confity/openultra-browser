@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="inspector-token" content="__TOKEN__" />
+    <title>OpenUltra</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="task-rail">
+        <header class="rail-header">
+          <a class="brand" href="/" aria-label="OpenUltra home">
+            <span class="brand-mark">O</span><span>OpenUltra</span>
+          </a>
+          <span class="local"><span class="status-dot"></span>Local</span>
+        </header>
+
+        <form id="task-form">
+          <label for="goal">Task</label>
+          <textarea id="goal" rows="6" required autofocus placeholder="Describe what you want the browser to do"></textarea>
+          <button class="primary" id="start" type="submit">
+            <span>Start task</span><span aria-hidden="true">&#8594;</span>
+          </button>
+        </form>
+
+        <div id="error" role="alert" hidden></div>
+
+        <section class="run-state" aria-live="polite">
+          <div class="status-line">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status">Ready for a task</span>
+          </div>
+          <div class="telemetry">
+            <span id="timer">00:00.000</span>
+            <span><b id="decision-ms">--</b> ms</span>
+            <span><b id="decision-rate">0.00</b> decisions/s</span>
+          </div>
+        </section>
+
+        <div class="run-controls">
+          <button id="run" type="button" disabled>Resume</button>
+          <button id="stop" type="button" hidden>Pause</button>
+        </div>
+
+        <section class="activity">
+          <div class="section-label"><span>Activity</span><span id="step-count">0</span></div>
+          <p class="current-action" id="current-action">No task running</p>
+          <div class="history" id="history"></div>
+        </section>
+
+        <footer>
+          <span>Private local runtime</span>
+          <span id="engine-state">Offline model</span>
+        </footer>
+      </aside>
+
+      <main class="browser-panel">
+        <div class="browser-bar">
+          <div class="traffic" aria-hidden="true"><b></b><b></b><b></b></div>
+          <span id="url">Isolated browser session</span>
+          <span class="live"><i></i>LIVE</span>
+        </div>
+        <div class="viewport" id="viewport">
+          <div class="empty" id="empty">
+            <div class="empty-symbol" aria-hidden="true">O</div>
+            <p>Browser preview</p>
+          </div>
+          <img id="screenshot" alt="Live screenshot of the controlled browser" hidden />
+          <div class="loading" id="loading" hidden>
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+        <div class="browser-footer">
+          <span id="page-title">No page observed</span>
+          <span id="frame-state">Waiting</span>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

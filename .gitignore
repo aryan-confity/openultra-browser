@@ -9,5 +9,7 @@ dist/
 build/
 *.egg-info/
 artifacts/
+.playwright-cli/
+output/
 .runtime/
 .env

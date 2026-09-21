@@ -1,5 +1,5 @@
-from laya_browser.browser import Browser
-from laya_browser.models import ActionKind
+from openultra_browser.browser import Browser
+from openultra_browser.models import ActionKind
 
 
 def test_navigation_settlement_waits_for_new_document():
@@ -52,7 +52,7 @@ def test_close_is_idempotent_when_target_is_already_absent(monkeypatch):
         calls += 1
         raise RuntimeError({"code": -32602, "message": "No target with given id found"})
 
-    monkeypatch.setattr("laya_browser.browser.cdp", missing_target)
+    monkeypatch.setattr("openultra_browser.browser.cdp", missing_target)
 
     browser.close()
     browser.close()

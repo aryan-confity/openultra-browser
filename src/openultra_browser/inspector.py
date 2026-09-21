@@ -1,4 +1,4 @@
-"""Loopback-only inspector for local Laya browser runs."""
+"""Loopback-only OpenUltra browser application."""
 
 from __future__ import annotations
 
@@ -12,8 +12,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import RunConfig, default_model_path
-from .decision import LayaDecisionEngine
+from .decision import OpenUltraDecisionEngine
 from .interactive import InteractiveAgent
+from .task_setup import plan_task
 
 STATIC_ROOT = Path(__file__).with_name("static")
 
@@ -46,7 +47,8 @@ class InspectorController:
 
     def reset(self, body: dict) -> dict:
         goal = _bounded_text(body.get("goal"), "goal", 4_000)
-        start_url = _bounded_text(body.get("url"), "url", 2_000)
+        planned = plan_task(goal)
+        start_url = _optional_text(body.get("url"), 2_000) or planned.start_url
         input_name = str(body.get("input_name") or "query").strip()
         input_value = str(body.get("input_value") or "")
         if input_value and (not input_name or len(input_name) > 80 or len(input_value) > 4_000):
@@ -62,7 +64,9 @@ class InspectorController:
             start_url=start_url,
             model=self.model,
             allowed_domains=allowed_domains,
-            prepared_inputs={input_name: input_value} if input_value else {},
+            prepared_inputs=(
+                {input_name: input_value} if input_value else planned.prepared_inputs
+            ),
             success_text=_optional_text(body.get("success_text"), 1_000),
             success_url_prefix=_optional_text(body.get("success_url_prefix"), 2_000),
             success_url_regex=_optional_text(body.get("success_url_regex"), 2_000),
@@ -73,12 +77,18 @@ class InspectorController:
             ),
             visible_text_chars=3_500,
             allow_risky=body.get("allow_risky") is True,
+            allow_external_navigation=body.get("url") in (None, ""),
         )
         self.close()
         if self.engine is None:
-            self.engine = LayaDecisionEngine(self.model)
+            self.engine = OpenUltraDecisionEngine(self.model)
         self.agent = InteractiveAgent(config, decision_engine=self.engine)
         return self.agent.state()
+
+    def frame(self) -> dict:
+        if self.agent is None:
+            raise ValueError("Start a task first")
+        return self.agent.capture_frame()
 
     def command(self, name: str, body: dict) -> dict:
         if name == "reset":
@@ -181,6 +191,24 @@ def run_inspector(
                 with lock:
                     self._json(200, controller.state())
                 return
+            if path == "/api/frame":
+                if self.headers.get("X-Inspector-Token") != token:
+                    self._json(403, {"error": "Local inspector requests only"})
+                    return
+                if not lock.acquire(blocking=False):
+                    self.send_response(204)
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return
+                try:
+                    self._json(200, controller.frame())
+                except (ValueError, RuntimeError):
+                    self.send_response(204)
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                finally:
+                    lock.release()
+                return
             files = {
                 "/": ("inspector.html", "text/html; charset=utf-8"),
                 "/app.js": ("inspector.js", "text/javascript; charset=utf-8"),
@@ -226,7 +254,7 @@ def run_inspector(
             return
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"Laya Browser Inspector: {origin}", flush=True)
+    print(f"OpenUltra: {origin}", flush=True)
     if open_browser:
         threading.Timer(0.25, lambda: webbrowser.open(origin)).start()
     try:

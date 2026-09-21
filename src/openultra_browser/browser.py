@@ -23,7 +23,7 @@ class StalePage(RuntimeError):
 
 VALIDATE_TARGET_SCRIPT = r"""
 ({ nodeId, expectedGuard, kind, selectLabel, selectValue }) => {
-  const cache = window.__layaBrowser;
+  const cache = window.__openUltraBrowser;
   const node = cache?.nodes.get(nodeId);
   if (!node?.isConnected || node.matches(':disabled') ||
       node.closest('[aria-disabled="true"],[inert]') ||

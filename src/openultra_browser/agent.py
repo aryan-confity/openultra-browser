@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from .browser import Browser, ExecutionUncertain, StalePage
 from .config import RunConfig
-from .decision import LayaDecisionEngine
+from .decision import OpenUltraDecisionEngine
 from .models import ActionKind, RunResult, StepRecord
 from .observation import build_actions
 from .policy import SafetyPolicy
@@ -20,14 +20,18 @@ class BrowserAgent:
         self,
         config: RunConfig,
         *,
-        decision_engine: LayaDecisionEngine | None = None,
+        decision_engine: OpenUltraDecisionEngine | None = None,
         browser_factory: Callable[..., Browser] = Browser,
         on_step: Callable[[StepRecord], None] | None = None,
     ) -> None:
         self.config = config
-        self.engine = decision_engine or LayaDecisionEngine(config.model, optimize=config.optimize)
+        self.engine = decision_engine or OpenUltraDecisionEngine(config.model, optimize=config.optimize)
         self.browser_factory = browser_factory
-        self.policy = SafetyPolicy(config.effective_allowed_domains, allow_risky=config.allow_risky)
+        self.policy = SafetyPolicy(
+            config.effective_allowed_domains,
+            allow_risky=config.allow_risky,
+            allow_external_navigation=config.allow_external_navigation,
+        )
         self.on_step = on_step or (lambda _record: None)
 
     def run(self) -> RunResult:
@@ -112,12 +116,22 @@ class BrowserAgent:
                     self.on_step(record)
                     break
                 if chosen.kind == ActionKind.DONE:
-                    status = "needs_verification"
-                    reason = (
-                        "Laya proposed completion, but no deterministic success check was supplied"
-                    )
                     history.append(record)
                     self.on_step(record)
+                    confirm = getattr(self.engine, "confirm_completion", None)
+                    confirmation = (
+                        confirm(goal=self.config.goal, snapshot=snapshot, history=history)
+                        if decision.goal_probability >= 0.75 and callable(confirm)
+                        else 0.0
+                    )
+                    if confirmation >= 0.75:
+                        status = "completed"
+                        reason = "Completion confirmed by two independent local checks"
+                    else:
+                        status = "needs_verification"
+                        reason = (
+                            "The model proposed completion without sufficient independent evidence"
+                        )
                     break
                 if chosen.kind == ActionKind.BLOCKED:
                     status, reason = "blocked", "No supported observed action can make progress"

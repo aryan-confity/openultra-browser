@@ -1,6 +1,6 @@
 import pytest
 
-from laya_browser.config import RunConfig, default_model_path
+from openultra_browser.config import RunConfig, default_model_path
 
 
 def test_start_domain_is_default_allowlist():
@@ -55,7 +55,7 @@ def test_invalid_url_regex_is_rejected():
 
 
 def test_model_environment_override_is_honored(monkeypatch):
-    monkeypatch.setenv("LAYA_MODEL_PATH", "/models/pinned-laya")
+    monkeypatch.setenv("OPENULTRA_MODEL_PATH", "/models/pinned-laya")
     assert default_model_path() == "/models/pinned-laya"
 
 

@@ -12,7 +12,7 @@ from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedElemen
 OBSERVE_SCRIPT = r"""
 ({ textLimit }) => {
   if (!document.body) return null;
-  const cache = window.__layaBrowser ||= {ids:new WeakMap(), nodes:new Map(), next:1};
+  const cache = window.__openUltraBrowser ||= {ids:new WeakMap(), nodes:new Map(), next:1};
   const identity = (node) => {
     if (!cache.ids.has(node)) cache.ids.set(node, cache.next++);
     const id = cache.ids.get(node);
@@ -83,7 +83,7 @@ OBSERVE_SCRIPT = r"""
     const nodeId = identity(node);
     const elementId = `e${nodeId}`;
     const label = name(node).slice(0, 140) || role;
-    node.setAttribute('data-laya-browser-id', elementId);
+    node.setAttribute('data-openultra-browser-id', elementId);
     elements.push({
       element_id: elementId,
       role,

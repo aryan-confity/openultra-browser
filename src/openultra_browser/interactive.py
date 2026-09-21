@@ -8,7 +8,7 @@ from typing import Any
 
 from .browser import Browser, ExecutionUncertain, StalePage
 from .config import RunConfig
-from .decision import LayaDecisionEngine
+from .decision import OpenUltraDecisionEngine
 from .models import ActionKind, BrowserSnapshot, CandidateAction, ModelDecision, StepRecord
 from .observation import build_actions
 from .policy import SafetyPolicy
@@ -32,14 +32,15 @@ class InteractiveAgent:
         self,
         config: RunConfig,
         *,
-        decision_engine: LayaDecisionEngine | None = None,
+        decision_engine: OpenUltraDecisionEngine | None = None,
         browser_factory=Browser,
     ) -> None:
         self.config = config
-        self.engine = decision_engine or LayaDecisionEngine(config.model, optimize=config.optimize)
+        self.engine = decision_engine or OpenUltraDecisionEngine(config.model, optimize=config.optimize)
         self.policy = SafetyPolicy(
             config.effective_allowed_domains,
             allow_risky=config.allow_risky,
+            allow_external_navigation=config.allow_external_navigation,
         )
         self.started_at_epoch_ms = round(time.time() * 1_000)
         self.started_at = time.perf_counter()
@@ -176,10 +177,25 @@ class InteractiveAgent:
         )
         step_started = time.perf_counter()
         if chosen.kind == ActionKind.DONE:
-            self.status = "needs_verification"
-            self.reason = "Laya proposed completion without a deterministic success check"
             self.history.append(record)
+            confirm = getattr(self.engine, "confirm_completion", None)
+            confirmation = (
+                confirm(
+                    goal=self.config.goal,
+                    snapshot=self.snapshot,
+                    history=self.history,
+                )
+                if decision.goal_probability >= 0.75 and callable(confirm)
+                else 0.0
+            )
+            if confirmation >= 0.75:
+                self.status = "completed"
+                self.reason = "Completion confirmed by two independent local checks"
+            else:
+                self.status = "needs_verification"
+                self.reason = "The model proposed completion without sufficient independent evidence"
             return self.state()
+
         if chosen.kind == ActionKind.BLOCKED:
             self.status, self.reason = "blocked", "No supported observed action can make progress"
             self.history.append(record)
@@ -220,6 +236,20 @@ class InteractiveAgent:
         if self.status == "ready":
             self._refresh()
         return self.state()
+
+    def capture_frame(self) -> dict[str, Any]:
+        """Capture pixels without observing controls or changing the decision state."""
+        try:
+            screenshot = self._screenshot()
+        except RuntimeError:
+            screenshot = None
+        if screenshot:
+            self.screenshot = screenshot
+        return {
+            "screenshot": self.screenshot,
+            "captured_at_epoch_ms": round(time.time() * 1_000),
+            "fresh": bool(screenshot),
+        }
 
     def tick(self) -> dict[str, Any]:
         self.predict()

@@ -23,9 +23,16 @@ RISKY_PATTERN = re.compile(
 
 
 class SafetyPolicy:
-    def __init__(self, allowed_domains: frozenset[str], *, allow_risky: bool = False) -> None:
+    def __init__(
+        self,
+        allowed_domains: frozenset[str],
+        *,
+        allow_risky: bool = False,
+        allow_external_navigation: bool = False,
+    ) -> None:
         self.allowed_domains = allowed_domains
         self.allow_risky = allow_risky
+        self.allow_external_navigation = allow_external_navigation
 
     def _reason_blocked(
         self,
@@ -37,7 +44,7 @@ class SafetyPolicy:
             target = urlparse(action.target_url)
             if target.scheme not in {"http", "https"}:
                 return "non-HTTP navigation is blocked"
-            if target.hostname not in self.allowed_domains:
+            if not self.allow_external_navigation and target.hostname not in self.allowed_domains:
                 return f"navigation to unapproved domain {target.hostname!r} is blocked"
         if action.element_id:
             element = elements.get(action.element_id)
@@ -50,7 +57,10 @@ class SafetyPolicy:
             return "destructive or financial action requires explicit --allow-risky"
         if action.kind in {ActionKind.DONE, ActionKind.BLOCKED}:
             return None
-        if urlparse(snapshot.url).hostname not in self.allowed_domains:
+        if (
+            not self.allow_external_navigation
+            and urlparse(snapshot.url).hostname not in self.allowed_domains
+        ):
             return "the current page is outside the approved domains"
         return None
 
@@ -81,6 +91,23 @@ class SafetyPolicy:
             action = by_id.get(action_id)
             if action is None:
                 rejected.append(f"{action_id}: not in observed action space")
+                continue
+            if action.kind == ActionKind.DONE and not any(row.changed for row in history):
+                rejected.append(f"{action_id}: no observable task progress has occurred")
+                continue
+            if action.kind == ActionKind.DONE and any(
+                candidate.kind != ActionKind.DONE and candidate.goal_match
+                for candidate in actions
+            ):
+                rejected.append(f"{action_id}: a visible goal-progress action remains")
+                continue
+            if action.kind == ActionKind.DONE and decision.goal_probability < 0.75:
+                rejected.append(
+                    f"{action_id}: independent completion confidence is below threshold"
+                )
+                continue
+            if action.kind == ActionKind.BLOCKED and decision.stuck_probability < 0.75:
+                rejected.append(f"{action_id}: independent stuck confidence is below threshold")
                 continue
             reason = self._reason_blocked(action, snapshot, elements)
             if reason:

@@ -1,5 +1,5 @@
-from laya_browser.models import BrowserSnapshot, ObservedElement, ObservedOption
-from laya_browser.observation import OBSERVE_SCRIPT, build_actions
+from openultra_browser.models import BrowserSnapshot, ObservedElement, ObservedOption
+from openultra_browser.observation import OBSERVE_SCRIPT, build_actions
 
 
 def snapshot(*elements):

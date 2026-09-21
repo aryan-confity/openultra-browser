@@ -37,8 +37,8 @@ def _step_line(record: StepRecord) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="laya-browser",
-        description="Control a browser with local Laya typed decisions.",
+        prog="openultra-browser",
+        description="Control a browser with local typed decisions.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run", help="Run a bounded browser goal")
@@ -82,7 +82,7 @@ def _run(args: argparse.Namespace) -> int:
         optimize=args.optimize,
         trace_path=args.trace,
     )
-    print(f"Loading local Laya model: {config.model}")
+    print(f"Loading OpenUltra local model: {config.model}")
     result = BrowserAgent(config, on_step=_step_line).run()
     print(json.dumps(result.to_dict(), indent=2))
     return 0 if result.status == "completed" else 1

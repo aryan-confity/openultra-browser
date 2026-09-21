@@ -3,15 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "laya-browser"
+name = "openultra-browser"
 version = "0.1.0"
-description = "Fast local browser control powered by Laya typed decisions"
+description = "Fast local browser control powered by typed decisions"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
 authors = [{ name = "Aryan Confity" }]
-keywords = ["laya", "browser-agent", "browser-automation", "local-ai", "typed-decisions"]
+keywords = ["browser-agent", "browser-automation", "local-ai", "typed-decisions"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: Apache Software License",
@@ -25,16 +25,16 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/aryan-confity/laya-browser"
+Repository = "https://github.com/aryan-confity/openultra-browser"
 
 [project.optional-dependencies]
 dev = ["build>=1.2", "pytest>=8", "ruff>=0.12"]
 
 [project.scripts]
-laya-browser = "laya_browser.cli:main"
+openultra-browser = "openultra_browser.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/laya_browser"]
+packages = ["src/openultra_browser"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

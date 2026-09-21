@@ -1,9 +1,9 @@
 import json
 
-from laya_browser.browser import StalePage
-from laya_browser.config import RunConfig
-from laya_browser.interactive import InteractiveAgent
-from laya_browser.models import BrowserSnapshot, ModelDecision, ObservedElement
+from openultra_browser.browser import StalePage
+from openultra_browser.config import RunConfig
+from openultra_browser.interactive import InteractiveAgent
+from openultra_browser.models import BrowserSnapshot, ModelDecision, ObservedElement
 
 
 class FakeBrowser:
@@ -165,4 +165,25 @@ def test_stale_execution_reobserves_without_automatic_replay():
     assert agent.browser.executions == 1
     assert state["history"][0]["executed_action"] is None
     assert state["history"][0]["action_error"].startswith("StalePage:")
+    agent.close()
+
+
+def test_live_frame_capture_does_not_change_observation_or_decision_state():
+    agent = InteractiveAgent(
+        config(),
+        decision_engine=FillEngine(),
+        browser_factory=FakeBrowser,
+    )
+    predicted = agent.predict()
+    fingerprint = predicted["page"]["fingerprint"]
+
+    frame = agent.capture_frame()
+    after = agent.state()
+
+    assert frame["screenshot"] == "c2NyZWVuc2hvdA=="
+    assert frame["captured_at_epoch_ms"] > 0
+    assert frame["fresh"] is True
+    assert after["status"] == "predicted"
+    assert after["page"]["fingerprint"] == fingerprint
+    assert after["decision"] == predicted["decision"]
     agent.close()
