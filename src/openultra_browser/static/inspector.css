@@ -95,6 +95,7 @@ textarea:focus { border-color: #568068; box-shadow: 0 0 0 3px rgb(62 128 92 / 16
 .voice-state.listening i { background: var(--green-dark); animation: pulse 1.1s ease-in-out infinite; }
 .voice-state b { overflow: hidden; color: inherit; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
 .voice-state button { min-height: 28px; padding: 4px 9px; font-size: 11px; }
+.voice-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 
 button {
   min-height: 42px;

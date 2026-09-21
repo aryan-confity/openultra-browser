@@ -96,6 +96,38 @@ class OpenUltraDecisionEngine:
             )
         self.agent = agent
 
+    def classify_voice_command(self, transcript: str, candidate: str) -> dict[str, float | str]:
+        """Classify one partial utterance without exposing it to browser execution."""
+        state = (
+            f"Current streaming speech transcript: {transcript}\n"
+            f"First atomic browser command candidate: {candidate}\n"
+            "Deterministic safety classification: reversible closed-set browser command: YES.\n"
+            "The speaker may still be talking. Judge only the candidate shown above."
+        )
+        questions = {
+            "complete": {
+                "type": "noul",
+                "instructions": (
+                    "Can the first atomic browser command candidate be executed exactly as stated "
+                    "without guessing any missing target, destination, direction, or value?"
+                ),
+                "criteria": {
+                    "false": "More spoken words are needed to know the requested browser action.",
+                    "true": "The candidate already contains a complete executable browser action.",
+                },
+            },
+        }
+        started = time.perf_counter()
+        result = self.agent.predict(state, questions)
+        inference_ms = (time.perf_counter() - started) * 1_000
+        completeness = _validate_noul(result["answers"]["complete"])
+        return {
+            "kind": "reversible_closed_set",
+            "confidence": completeness,
+            "completeness": completeness,
+            "inference_ms": inference_ms,
+        }
+
     def decide(
         self,
         *,

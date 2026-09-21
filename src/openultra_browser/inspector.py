@@ -15,6 +15,7 @@ from .config import RunConfig, default_model_path
 from .decision import OpenUltraDecisionEngine
 from .interactive import InteractiveAgent
 from .task_setup import plan_task
+from .voice import prepare_voice_candidate, should_commit_voice_candidate
 
 STATIC_ROOT = Path(__file__).with_name("static")
 
@@ -106,10 +107,40 @@ class InspectorController:
             raise ValueError("Start a task first")
         return self.agent.capture_frame()
 
+    def voice_plan(self, body: dict) -> dict:
+        transcript = _bounded_text(body.get("transcript"), "transcript", 4_000)
+        candidate = prepare_voice_candidate(transcript)
+        if not candidate.eligible:
+            return {
+                "decision": "wait",
+                "candidate": candidate.text,
+                "reason": candidate.reason,
+                "inference_ms": 0.0,
+            }
+        if self.engine is None:
+            self.engine = OpenUltraDecisionEngine(self.model)
+        result = self.engine.classify_voice_command(transcript, candidate.text)
+        commit = should_commit_voice_candidate(
+            candidate,
+            command_kind=str(result["kind"]),
+            confidence=float(result["confidence"]),
+            completeness=float(result["completeness"]),
+        )
+        return {
+            "decision": "act" if commit else "wait",
+            "candidate": candidate.text,
+            "reason": (
+                "Stable reversible command" if commit else "Waiting for a stable complete command"
+            ),
+            **result,
+        }
+
     def command(self, name: str, body: dict) -> dict:
         if name == "reset":
             state = self.reset(body)
             return {**state, "run_id": self.run_id}
+        if name == "voice-plan":
+            return self.voice_plan(body)
         if self.agent is None:
             raise ValueError("Start a task first")
         if body.get("run_id") != self.run_id:

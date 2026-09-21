@@ -42,6 +42,12 @@ observes semantic controls plus explicit event handlers, focusable surfaces, and
 pointer targets. Covered, oversized, hidden, offscreen, and duplicate containers are excluded.
 Every observation receives a content fingerprint.
 
+Before an action that can open a new page, the executor snapshots the current CDP page targets.
+If the action creates a same-context child target, OpenUltra attaches to and activates it, reapplies
+the viewport and focus contract, and makes it authoritative for the next observation and live frame.
+Existing unrelated targets are never selected merely because they are open. All targets created by
+the run remain owned and are closed together during cleanup.
+
 The candidate builder scores goal/element token overlap and keeps a bounded set that fits the model's
 context. Global back, scroll, and wait actions remain available. Text actions refer to named prepared
 values; the actual values remain in the executor. A fill whose exact prepared value is already
@@ -105,10 +111,12 @@ latency, decisions per second, current action, and recent history without exposi
 constraints or probability panels.
 
 The task input can use text or the browser's Web Speech API. Voice recognition is an input adapter,
-not a second agent: only a final utterance is submitted, and it enters the same reset or continue
-contract, task decomposition, policy, execution, and verification path as typed text. Audio is not
-sent to the OpenUltra server. Browser speech-recognition availability and processing behavior are
-controlled by the browser implementation.
+not a second agent. Debounced partial speech receives one local typed-decision batch for command
+kind and completeness. Deterministic and model agreement can commit only a reversible closed-set
+first step; payload-bearing and consequential actions wait for final speech. A committed prefix is
+consumed once, and later words in the same utterance are retasked from the resulting page. Stale
+partial decisions cannot execute. Audio is not sent to the OpenUltra server. If browser speech
+recognition is unavailable, the captured or typed transcript remains directly runnable.
 
 A read-only frame endpoint captures browser pixels independently from DOM observation. It uses the
 same nonblocking browser lock as commands, so preview refreshes cannot race prediction or input.
@@ -129,6 +137,6 @@ executor; serialized inspector state exposes only their names through action des
 - Confidence is useful for ranking but is not a correctness or safety guarantee.
 - Same-origin redirects can still load a different origin before the next observation blocks further
   actions; use an isolated browser profile and trusted starting sites.
-- Shadow roots, frames, canvas, downloads, uploads, pop-up tabs, and nested scrolling are outside the
+- Shadow roots, frames, canvas, downloads, uploads, and nested scrolling are outside the
   current runtime.
 - Complex tasks should be decomposed into bounded goals with deterministic postconditions.

@@ -93,3 +93,51 @@ def test_submit_transport_success_is_execution_evidence():
         submission_started_at=100.0,
     )
     assert "HTTP 201" in browser.last_action_evidence
+
+
+def test_new_child_tab_becomes_the_active_observation_target():
+    browser = object.__new__(Browser)
+    browser.targets = ["original"]
+    browser.target = "original"
+    browser.browser_context_id = "context-1"
+    pages = iter(
+        [
+            {"original": {"targetId": "original", "type": "page"}},
+            {
+                "original": {"targetId": "original", "type": "page"},
+                "popup": {
+                    "targetId": "popup",
+                    "type": "page",
+                    "openerId": "original",
+                    "url": "https://example.com/details",
+                },
+            },
+        ]
+    )
+    browser._page_targets = lambda: next(pages)
+    browser._bind_target = lambda target: setattr(browser, "target", target)
+    browser.evaluate = lambda _expression: "complete"
+    browser._wait_for_semantic_quiet = lambda **_kwargs: None
+
+    assert browser._adopt_new_target({"original"}, timeout_seconds=0.2)
+    assert browser.target == "popup"
+
+
+def test_unrelated_existing_tabs_are_not_adopted():
+    browser = object.__new__(Browser)
+    browser.targets = ["original"]
+    browser.target = "original"
+    browser.browser_context_id = "context-1"
+    browser._page_targets = lambda: {
+        "original": {"targetId": "original", "type": "page"},
+        "existing": {
+            "targetId": "existing",
+            "type": "page",
+            "url": "https://example.net",
+        },
+    }
+
+    assert not browser._adopt_new_target(
+        {"original", "existing"}, timeout_seconds=0
+    )
+    assert browser.target == "original"

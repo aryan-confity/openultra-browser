@@ -27,6 +27,7 @@ bounded typed actions ---> local MLX model ---> probabilities
 - Dynamic operation and target heads built only from currently visible, indexed DOM nodes.
 - Broad semantic observation covers native controls, explicit handlers, focusable surfaces, and
   leaf pointer targets while rejecting covered, oversized, hidden, and duplicate containers.
+- New child tabs become the active CDP observation and live-preview target atomically.
 - Stale-target, cross-domain, password, upload, financial, and destructive-action guards.
 - Named prepared values for text fields; values are not placed in the model prompt.
 - Probability-aware fallback when the highest-ranked action is blocked or recently ineffective.
@@ -105,8 +106,13 @@ invents text. Submitting the task starts the guarded run immediately. The fixed-
 keeps the prompt, pause/resume control, elapsed clock, latest decision time, decision rate, compact
 activity trail, and continuously refreshed browser preview visible together without dashboard
 panels or advanced run-constraint fields. Text and voice modes share the same guarded task engine.
-Voice mode uses the browser's Web Speech API, waits for a final transcript, and then starts either a
-new task or a continuation from the current page; partial speech never executes browser input.
+Voice mode uses the browser's Web Speech API and streams debounced partial transcripts into one
+local Laya command-type/completeness batch. A reversible closed-set first step can begin before the
+speaker finishes; searches, field values, selections, submissions, and other side effects wait for
+the final utterance. Words spoken after an early committed step become a continuation from the
+resulting page. Stale partial decisions are ignored. If browser speech recognition is unavailable,
+the captured or typed transcript remains runnable instead of stranding the task. Live recognition
+requires Chrome or Edge support for the Web Speech API.
 
 Task-first inspector runs may follow observed HTTP(S) links across sites because their eventual
 destination is not known before the task starts. Password and file inputs, non-HTTP destinations,

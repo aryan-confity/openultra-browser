@@ -219,6 +219,31 @@ def test_completion_confirmation_is_a_focused_boolean_check():
     assert probability == 0.91
 
 
+def test_voice_command_type_and_completeness_share_one_local_batch():
+    class VoiceAgent:
+        def predict(self, state, questions):
+            assert "Current streaming speech transcript: open wikipedia and search" in state
+            assert "First atomic browser command candidate: open wikipedia" in state
+            assert "reversible closed-set browser command: YES" in state
+            assert set(questions) == {"complete"}
+            return {
+                "answers": {
+                    "complete": {"noul": 0.91},
+                }
+            }
+
+    engine = OpenUltraDecisionEngine("unused", agent=VoiceAgent())
+    result = engine.classify_voice_command(
+        "open wikipedia and search",
+        "open wikipedia",
+    )
+
+    assert result["kind"] == "reversible_closed_set"
+    assert result["confidence"] == 0.91
+    assert result["completeness"] == 0.91
+    assert result["inference_ms"] >= 0
+
+
 def test_step_completion_confirmation_requires_no_further_action():
     class StepAgent:
         def predict(self, state, questions):

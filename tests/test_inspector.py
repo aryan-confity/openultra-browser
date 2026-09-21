@@ -34,7 +34,7 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert "requestAnimationFrame(drawTimer)" in script
     assert 'id="start-url"' not in html
     assert "Run constraints" not in html
-    assert 'goal: byId("goal").value' in script
+    assert "goal," in script
     assert 'fetch("/api/frame"' in script
     assert "setInterval(refreshFrame, 400)" in script
     assert "requestAnimationFrame(() => requestAnimationFrame(resolve))" in script
@@ -45,8 +45,12 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert "payload.run_id = state.run_id" in script
     assert 'id="voice-mode"' in html
     assert 'id="cancel-voice"' in html
+    assert 'id="run-transcript"' in html
     assert "window.SpeechRecognition || window.webkitSpeechRecognition" in script
-    assert "queueMicrotask(() => startTask(command))" in script
+    assert "nextRecognition.continuous = true" in script
+    assert 'fetch("/api/voice-plan"' in script
+    assert "Acting while you speak" in script
+    assert "Run the captured transcript" in script
 
 
 def test_inspector_static_assets_are_packaged_below_the_module():
@@ -144,3 +148,45 @@ def test_retask_rotates_run_identity_without_replacing_the_agent(monkeypatch):
     assert controller.run_id != first_run_id
     assert state["run_id"] == controller.run_id
     assert agent.config.start_url == "https://example.com/current"
+
+
+def test_voice_plan_requires_model_and_deterministic_agreement():
+    class VoiceEngine:
+        def classify_voice_command(self, transcript, candidate):
+            assert transcript == "open wikipedia and search for Alan Turing"
+            assert candidate == "open wikipedia"
+            return {
+                "kind": "reversible_closed_set",
+                "confidence": 0.88,
+                "completeness": 0.92,
+                "inference_ms": 41.0,
+            }
+
+    controller = InspectorController("model")
+    controller.engine = VoiceEngine()
+
+    result = controller.command(
+        "voice-plan",
+        {"transcript": "open wikipedia and search for Alan Turing"},
+    )
+
+    assert result["decision"] == "act"
+    assert result["candidate"] == "open wikipedia"
+    assert result["inference_ms"] == 41.0
+
+
+def test_voice_plan_rejects_open_ended_payload_without_model_call():
+    class UnusedEngine:
+        def classify_voice_command(self, *_args):
+            raise AssertionError("payload speech must not reach early-commit inference")
+
+    controller = InspectorController("model")
+    controller.engine = UnusedEngine()
+
+    result = controller.command(
+        "voice-plan",
+        {"transcript": "search for Alan"},
+    )
+
+    assert result["decision"] == "wait"
+    assert result["inference_ms"] == 0.0

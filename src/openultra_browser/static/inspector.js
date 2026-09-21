@@ -11,6 +11,11 @@ let inputMode = "text";
 let recognition = null;
 let voiceListening = false;
 let voiceGeneration = 0;
+let voiceSession = null;
+let voicePlanTimer = null;
+let voicePlanInFlight = false;
+let voicePlanQueued = null;
+let voiceFallbackCommand = "reset";
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -71,6 +76,7 @@ function setControls() {
   byId("goal").disabled = busy;
   byId("text-mode").disabled = busy || voiceListening;
   byId("voice-mode").disabled = busy || voiceListening;
+  byId("run-transcript").disabled = busy || voiceListening || !byId("goal").value.trim();
   byId("run").disabled = busy || !active || automatic;
   byId("run").hidden = automatic;
   byId("stop").hidden = !automatic;
@@ -85,31 +91,145 @@ function renderInputMode() {
   byId("voice-mode").setAttribute("aria-pressed", String(voice));
   byId("voice-state").hidden = !voice;
   byId("goal").placeholder = voice
-    ? "Your final spoken task appears here"
+    ? "Your spoken task appears here as you talk"
     : "Describe what you want the browser to do";
   byId("goal").required = !voice;
   byId("start").textContent = voice ? "Speak new task" : "Start new task";
   byId("continue-task").textContent = voice
     ? "Speak and continue"
     : "Continue from current page";
+  updateTranscriptFallback();
   setControls();
 }
 
-function stopVoice({ cancelled = false } = {}) {
+function updateTranscriptFallback(force = false) {
+  const available = inputMode === "voice" && Boolean(byId("goal").value.trim());
+  byId("run-transcript").hidden = !(available && (force || !voiceListening));
+}
+
+function clearVoicePlanning() {
+  clearTimeout(voicePlanTimer);
+  voicePlanTimer = null;
+  voicePlanQueued = null;
+}
+
+function stopVoice({ cancelled = false, preserveSession = false } = {}) {
   voiceListening = false;
   try { recognition?.stop(); } catch { /* The recognizer may already be stopped. */ }
   recognition = null;
+  clearVoicePlanning();
+  if (!preserveSession) voiceSession = null;
   byId("cancel-voice").hidden = true;
   byId("voice-state").classList.remove("listening");
   byId("voice-label").textContent = cancelled ? "Listening cancelled" : "Ready to listen";
+  updateTranscriptFallback();
+  setControls();
+}
+
+function transcriptTail(fullText, committedText) {
+  const full = fullText.replace(/\s+/g, " ").trim();
+  const committed = committedText.replace(/\s+/g, " ").trim();
+  if (!full.toLocaleLowerCase().startsWith(committed.toLocaleLowerCase())) return "";
+  return full.slice(committed.length)
+    .replace(/^\s*(?:,|;|\band\s+then\b|\bthen\b|\band\b)+\s*/i, "")
+    .trim();
+}
+
+async function postVoicePlan(transcript) {
+  const response = await fetch("/api/voice-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Inspector-Token": token },
+    body: JSON.stringify({ transcript }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Voice decision failed");
+  return data;
+}
+
+async function flushVoicePlan() {
+  if (voicePlanInFlight || !voicePlanQueued || !voiceSession?.listening) return;
+  const request = voicePlanQueued;
+  voicePlanQueued = null;
+  voicePlanInFlight = true;
+  byId("voice-label").textContent = "Understanding";
+  try {
+    const plan = await postVoicePlan(request.transcript);
+    if (
+      voiceSession?.generation === request.generation
+      && voiceSession.listening
+      && !voiceSession.committedText
+      && !voiceSession.final
+      && plan.decision === "act"
+    ) {
+      voiceSession.committedText = plan.candidate;
+      byId("voice-label").textContent = "Acting while you speak";
+      void executeVoiceTask(voiceSession.command, plan.candidate);
+    } else if (voiceSession?.generation === request.generation && voiceSession.listening) {
+      byId("voice-label").textContent = "Listening";
+    }
+  } catch (error) {
+    if (voiceSession?.generation === request.generation) {
+      byId("voice-label").textContent = "Listening";
+      byId("error").textContent = error.message;
+      byId("error").hidden = false;
+    }
+  } finally {
+    voicePlanInFlight = false;
+    if (voicePlanQueued) void flushVoicePlan();
+  }
+}
+
+function scheduleVoicePlan(transcript, generation) {
+  clearTimeout(voicePlanTimer);
+  voicePlanQueued = { transcript, generation };
+  voicePlanTimer = setTimeout(() => void flushVoicePlan(), 200);
+}
+
+async function executeVoiceTask(command, goal) {
+  if (!goal.trim()) return;
+  if (busy) {
+    if (voiceSession) voiceSession.pendingTask = { command, goal };
+    return;
+  }
+  await startTask(command, goal);
+  if (voiceSession?.pendingTask && !busy) {
+    const pending = voiceSession.pendingTask;
+    voiceSession.pendingTask = null;
+    await executeVoiceTask(pending.command, pending.goal);
+  }
+}
+
+function finalizeVoiceTranscript(transcript) {
+  if (!voiceSession || voiceSession.final) return;
+  voiceSession.final = true;
+  voiceSession.listening = false;
+  const committed = voiceSession.committedText;
+  const tail = committed ? transcriptTail(transcript, committed) : transcript;
+  clearVoicePlanning();
+  try { recognition?.stop(); } catch { /* The recognizer may already be stopped. */ }
+  recognition = null;
+  voiceListening = false;
+  byId("cancel-voice").hidden = true;
+  byId("voice-state").classList.remove("listening");
+  if (committed && !tail) {
+    byId("voice-label").textContent = "Spoken command committed";
+  } else if (tail) {
+    byId("voice-label").textContent = committed ? "Continuing spoken task" : "Task captured";
+    const command = committed ? "retask" : voiceSession.command;
+    voiceSession.pendingTask = { command, goal: tail };
+    void executeVoiceTask(command, tail);
+  }
+  updateTranscriptFallback();
   setControls();
 }
 
 function listenForTask(command) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
-    byId("error").textContent = "Voice input requires a browser with the Web Speech API.";
+    voiceFallbackCommand = command;
+    byId("error").textContent = "Live voice needs Chrome or Edge speech recognition. You can still type or paste the transcript and run it.";
     byId("error").hidden = false;
+    updateTranscriptFallback(true);
     return;
   }
   stopVoice();
@@ -117,7 +237,17 @@ function listenForTask(command) {
   const nextRecognition = new SpeechRecognition();
   recognition = nextRecognition;
   voiceListening = true;
-  nextRecognition.continuous = false;
+  voiceFallbackCommand = command;
+  voiceSession = {
+    generation,
+    command,
+    committedText: "",
+    final: false,
+    latestTranscript: "",
+    listening: true,
+    pendingTask: null,
+  };
+  nextRecognition.continuous = true;
   nextRecognition.interimResults = true;
   nextRecognition.lang = "en-US";
   nextRecognition.maxAlternatives = 1;
@@ -136,27 +266,35 @@ function listenForTask(command) {
       .trim();
     if (transcript) byId("goal").value = transcript;
     const final = Array.from(event.results).every((result) => result.isFinal);
-    byId("voice-label").textContent = final ? "Task captured" : "Listening";
-    if (final && transcript) {
-      voiceListening = false;
-      recognition = null;
-      byId("cancel-voice").hidden = true;
-      byId("voice-state").classList.remove("listening");
-      queueMicrotask(() => startTask(command));
-    }
+    if (voiceSession) voiceSession.latestTranscript = transcript;
+    updateTranscriptFallback();
+    if (final && transcript) finalizeVoiceTranscript(transcript);
+    else if (transcript && !voiceSession?.committedText) scheduleVoicePlan(transcript, generation);
   };
   nextRecognition.onerror = (event) => {
     if (generation !== voiceGeneration) return;
-    stopVoice();
-    byId("error").textContent = `Voice input failed: ${event.error || "unknown error"}`;
+    const captured = byId("goal").value.trim();
+    const committed = voiceSession?.committedText || "";
+    const remaining = committed ? transcriptTail(captured, committed) : captured;
+    if (committed) {
+      voiceFallbackCommand = "retask";
+      if (remaining) byId("goal").value = remaining;
+    }
+    stopVoice({ preserveSession: false });
+    byId("error").textContent = event.error === "network"
+      ? "Browser speech recognition is unavailable. Run the captured transcript below, or open OpenUltra in Chrome or Edge for live voice."
+      : `Voice input failed: ${event.error || "unknown error"}. You can still run the captured transcript.`;
     byId("error").hidden = false;
+    if (remaining) updateTranscriptFallback(true);
   };
   nextRecognition.onend = () => {
     if (generation !== voiceGeneration || !voiceListening) return;
-    stopVoice();
-    byId("voice-label").textContent = byId("goal").value.trim()
-      ? "Task captured. Try again to run it."
-      : "No speech captured";
+    const transcript = voiceSession?.latestTranscript || byId("goal").value.trim();
+    if (transcript) finalizeVoiceTranscript(transcript);
+    else {
+      stopVoice();
+      byId("voice-label").textContent = "No speech captured";
+    }
   };
   nextRecognition.start();
 }
@@ -241,7 +379,7 @@ async function runAutomatically() {
   }
 }
 
-async function startTask(command = "reset") {
+async function startTask(command = "reset", goal = byId("goal").value) {
   if (busy) return;
   busy = true;
   automatic = false;
@@ -250,7 +388,7 @@ async function startTask(command = "reset") {
   setControls();
   try {
     await call(command, {
-      goal: byId("goal").value,
+      goal,
       max_steps: 24,
       max_seconds: 180,
       max_candidates: 20,
@@ -294,6 +432,13 @@ byId("cancel-voice").addEventListener("click", () => {
   voiceGeneration += 1;
   stopVoice({ cancelled: true });
 });
+byId("run-transcript").addEventListener("click", () => {
+  const transcript = byId("goal").value.trim();
+  if (!transcript || busy) return;
+  byId("error").hidden = true;
+  void startTask(voiceFallbackCommand, transcript);
+});
+byId("goal").addEventListener("input", () => updateTranscriptFallback());
 
 byId("run").addEventListener("click", () => {
   if (!busy && state?.page && !terminal.has(state.status)) {

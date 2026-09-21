@@ -194,16 +194,14 @@ class Browser:
         ensure_daemon()
         self.text_limit = text_limit
         self.last_action_evidence: str | None = None
-        self.target = cdp("Target.createTarget", url="about:blank", background=False)["targetId"]
-        self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
-        self.call(
-            "Emulation.setDeviceMetricsOverride",
-            width=1120,
-            height=780,
-            deviceScaleFactor=1,
-            mobile=False,
-        )
-        self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+        self.targets: list[str] = []
+        target = cdp("Target.createTarget", url="about:blank", background=False)["targetId"]
+        target_info = cdp("Target.getTargetInfo", targetId=target).get("targetInfo", {})
+        self.browser_context_id = target_info.get("browserContextId")
+        self.target = target
+        self.session = ""
+        self._bind_target(target)
+
         self.call("Page.navigate", url=url)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -212,6 +210,71 @@ class Browser:
             time.sleep(0.02)
         self.close()
         raise TimeoutError(f"Browser did not load {url!r} within 15 seconds")
+
+    def _bind_target(self, target: str) -> None:
+        previous_session = self.session
+        self.target = target
+        self.session = cdp("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
+        if target not in self.targets:
+            self.targets.append(target)
+        self.call(
+            "Emulation.setDeviceMetricsOverride",
+            width=1120,
+            height=780,
+            deviceScaleFactor=1,
+            mobile=False,
+        )
+        self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+        cdp("Target.activateTarget", targetId=target)
+        if previous_session and previous_session != self.session:
+            try:
+                cdp("Target.detachFromTarget", sessionId=previous_session)
+            except RuntimeError:
+                pass
+
+    def _page_targets(self) -> dict[str, dict]:
+        infos = cdp("Target.getTargets").get("targetInfos", [])
+        return {
+            item["targetId"]: item
+            for item in infos
+            if item.get("type") == "page"
+            and (
+                not self.browser_context_id
+                or item.get("browserContextId") == self.browser_context_id
+            )
+        }
+
+    def _adopt_new_target(
+        self, before_targets: set[str], *, timeout_seconds: float = 0.45
+    ) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            pages = self._page_targets()
+            candidates = [
+                item
+                for target_id, item in pages.items()
+                if target_id not in before_targets
+                and (
+                    item.get("openerId") in self.targets
+                    or item.get("url") not in {"", "about:blank"}
+                )
+            ]
+            if candidates:
+                target = candidates[-1]["targetId"]
+                self._bind_target(target)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        if self.evaluate("document.readyState") in {"interactive", "complete"}:
+                            self._wait_for_semantic_quiet(quiet_ms=125, timeout_ms=1_500)
+                            return True
+                    except RuntimeError:
+                        pass
+                    time.sleep(0.02)
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
 
     @property
     def url(self) -> str:
@@ -253,6 +316,11 @@ class Browser:
     ) -> bool:
         self.last_action_evidence = None
         before_url = self.url
+        before_targets = (
+            set(self._page_targets())
+            if action.kind in {ActionKind.CLICK, ActionKind.PRESS_ENTER}
+            else set()
+        )
         if before_url != snapshot.url:
             raise StalePage("Page navigated after observation; refusing a stale action")
         if action.kind == ActionKind.SCROLL_DOWN:
@@ -347,6 +415,9 @@ class Browser:
                         button="left",
                         clickCount=1,
                     )
+                if self._adopt_new_target(before_targets):
+                    self.last_action_evidence = "Opened a new browser tab and focused it"
+                    return True
             elif action.kind == ActionKind.FILL:
                 modifiers = 4 if sys.platform == "darwin" else 2
                 for event in ("keyDown", "keyUp"):
@@ -369,6 +440,9 @@ class Browser:
                         windowsVirtualKeyCode=13,
                         nativeVirtualKeyCode=13,
                     )
+                if self._adopt_new_target(before_targets):
+                    self.last_action_evidence = "Opened a new browser tab and focused it"
+                    return True
             elif action.kind != ActionKind.SELECT:
                 raise ValueError(f"Unsupported action kind: {action.kind}")
             return self._settle(
@@ -511,15 +585,17 @@ class Browser:
         return False
 
     def close(self) -> None:
-        target = self.target
+        targets = list(dict.fromkeys(getattr(self, "targets", ()) or (self.target,)))
         self.target = None
-        if not target:
+        self.targets = []
+        if not targets or not targets[0]:
             return
-        try:
-            cdp("Target.closeTarget", targetId=target)
-        except RuntimeError as error:
-            if "No target with given id found" not in str(error):
-                raise
+        for target in reversed(targets):
+            try:
+                cdp("Target.closeTarget", targetId=target)
+            except RuntimeError as error:
+                if "No target with given id found" not in str(error):
+                    raise
 
     def __enter__(self):
         return self
