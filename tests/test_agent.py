@@ -1,0 +1,131 @@
+from laya_browser.agent import BrowserAgent
+from laya_browser.browser import ExecutionUncertain
+from laya_browser.config import RunConfig
+from laya_browser.models import BrowserSnapshot, ModelDecision
+
+
+class FakeBrowser:
+    def __init__(self, _url, *, text_limit):
+        self.snapshot = BrowserSnapshot(
+            "https://example.com/done",
+            "Done",
+            "The requested result is visible",
+            (),
+        )
+
+    @property
+    def url(self):
+        return self.snapshot.url
+
+    def observe(self):
+        return self.snapshot
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+
+class DoneEngine:
+    def decide(self, **_kwargs):
+        return ModelDecision(
+            proposed_action="done",
+            probabilities={
+                "scroll_down": 0.0,
+                "scroll_up": 0.0,
+                "back": 0.0,
+                "wait": 0.0,
+                "done": 1.0,
+            },
+            confidence=1.0,
+            goal_probability=1.0,
+            stuck_probability=0.0,
+            inference_ms=1.0,
+            input_tokens=10,
+        )
+
+
+class UnexpectedEngine:
+    def decide(self, **_kwargs):
+        raise AssertionError("A verified page must complete before model inference")
+
+
+class BackEngine:
+    def decide(self, **_kwargs):
+        return ModelDecision(
+            proposed_action="back",
+            probabilities={"back": 1.0, "wait": 0.0, "done": 0.0},
+            confidence=1.0,
+            goal_probability=0.0,
+            stuck_probability=0.0,
+            inference_ms=1.0,
+            input_tokens=10,
+        )
+
+
+class UncertainBrowser(FakeBrowser):
+    def __init__(self, url, *, text_limit):
+        super().__init__(url, text_limit=text_limit)
+        self.snapshot = BrowserSnapshot(
+            self.snapshot.url,
+            self.snapshot.title,
+            self.snapshot.visible_text,
+            self.snapshot.elements,
+            can_go_back=True,
+        )
+
+    def act(self, *_args):
+        raise ExecutionUncertain("input may have executed")
+
+
+def test_done_proposal_never_claims_unverified_success():
+    result = BrowserAgent(
+        RunConfig(goal="Finish", start_url="https://example.com"),
+        decision_engine=DoneEngine(),
+        browser_factory=FakeBrowser,
+    ).run()
+
+    assert result.status == "needs_verification"
+    assert "no deterministic success check" in result.reason
+
+
+def test_success_text_completes_before_model_inference():
+    result = BrowserAgent(
+        RunConfig(
+            goal="Show the result",
+            start_url="https://example.com",
+            success_text="requested result",
+        ),
+        decision_engine=UnexpectedEngine(),
+        browser_factory=FakeBrowser,
+    ).run()
+
+    assert result.status == "completed"
+
+
+def test_all_configured_success_checks_must_pass():
+    result = BrowserAgent(
+        RunConfig(
+            goal="Show the result",
+            start_url="https://example.com",
+            success_text="requested result",
+            success_url_prefix="https://example.com/done",
+        ),
+        decision_engine=UnexpectedEngine(),
+        browser_factory=FakeBrowser,
+    ).run()
+
+    assert result.status == "completed"
+    assert "URL prefix" in result.reason
+
+
+def test_uncertain_execution_stops_without_retry():
+    result = BrowserAgent(
+        RunConfig(goal="Go back", start_url="https://example.com"),
+        decision_engine=BackEngine(),
+        browser_factory=UncertainBrowser,
+    ).run()
+
+    assert result.status == "needs_verification"
+    assert len(result.steps) == 1

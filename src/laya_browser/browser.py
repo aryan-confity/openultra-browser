@@ -1,0 +1,317 @@
+"""Persistent Chrome CDP transport with guarded, one-shot observed actions."""
+
+from __future__ import annotations
+
+import json
+import sys
+import time
+
+from browser_harness.admin import ensure_daemon
+from browser_harness.helpers import cdp
+
+from .models import ActionKind, BrowserSnapshot, CandidateAction
+from .observation import OBSERVE_SCRIPT, decode_observation
+
+
+class ExecutionUncertain(RuntimeError):
+    """Browser input may have executed; automatic retry is unsafe."""
+
+
+VALIDATE_TARGET_SCRIPT = r"""
+({ nodeId, expectedGuard, kind, selectLabel, selectValue }) => {
+  const cache = window.__layaBrowser;
+  const node = cache?.nodes.get(nodeId);
+  if (!node?.isConnected || node.matches(':disabled') ||
+      node.closest('[aria-disabled="true"],[inert]') ||
+      !node.checkVisibility({checkOpacity:true, checkVisibilityCSS:true})) return null;
+  const rect = node.getBoundingClientRect();
+  const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+  if (!rect.width || !rect.height || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+  if (!node.contains(document.elementFromPoint(x, y))) return null;
+  const normal = (value) => (value || '').replace(/\s+/g, ' ').trim();
+  const name = (item, seen = new Set()) => {
+    if (!item || seen.has(item)) return '';
+    seen.add(item);
+    const referenced = normal(item.getAttribute?.('aria-labelledby')).split(' ').filter(Boolean)
+      .map((id) => name(document.getElementById(id), seen)).filter(Boolean).join(' ');
+    const labels = item.labels ? Array.from(item.labels).map((label) => name(label, seen)).join(' ') : '';
+    const children = item.tagName === 'INPUT' ? '' : Array.from(item.childNodes || []).map((child) =>
+      child.nodeType === 3 ? child.textContent :
+      child.nodeType === 1 && child.getAttribute('aria-hidden') !== 'true' ? name(child, seen) : ''
+    ).join(' ');
+    return normal(referenced || item.getAttribute?.('aria-label') || labels ||
+      (['button', 'submit', 'reset'].includes(item.type) ? item.value : '') ||
+      item.getAttribute?.('alt') || children || item.getAttribute?.('title') ||
+      item.getAttribute?.('placeholder'));
+  };
+  const roles = ['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio',
+    'option','gridcell','combobox','textbox','searchbox','spinbutton'];
+  const explicit = node.getAttribute('role');
+  let role = roles.includes(explicit) ? explicit : null;
+  if (!role && (node.tagName === 'BUTTON' || node.tagName === 'SUMMARY')) role = 'button';
+  if (!role && node.tagName === 'A') role = 'link';
+  if (!role && node.tagName === 'SELECT') role = 'combobox';
+  if (!role && (node.tagName === 'TEXTAREA' || node.isContentEditable)) role = 'textbox';
+  if (!role && node.tagName === 'INPUT') {
+    if (['checkbox', 'radio'].includes(node.type)) role = node.type;
+    else if (['button', 'submit', 'reset', 'image'].includes(node.type)) role = 'button';
+    else if (node.type === 'search') role = 'searchbox';
+    else if (node.type === 'number') role = 'spinbutton';
+    else if (['text', 'email', 'url', 'tel', ''].includes(node.type)) role = 'textbox';
+  }
+  const label = name(node).slice(0, 140) || role;
+  const scope = node.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || node.parentElement;
+  const guard = JSON.stringify([
+    nodeId, role, label, node.value ?? null, node.checked ?? null, node.selectedIndex ?? null,
+    node.readOnly ?? null, node.matches(':disabled'), node.getAttribute('aria-disabled'),
+    node.getAttribute('aria-expanded'), node.getAttribute('aria-checked'),
+    node.getAttribute('aria-selected'), node.getAttribute('href'),
+    normal(scope?.innerText).slice(0, 800)
+  ]);
+  if (guard !== expectedGuard) return null;
+  if (kind === 'fill' && (node.readOnly || node.getAttribute('aria-readonly') === 'true')) return null;
+  if (selectLabel !== null) {
+    if (node.tagName !== 'SELECT') return null;
+    const option = Array.from(node.options).find((item) => item.text.trim() === selectLabel &&
+      String(item.value) === selectValue && !item.disabled && !item.closest('optgroup[disabled]'));
+    if (!option) return null;
+    node.value = option.value;
+    node.dispatchEvent(new Event('input', {bubbles:true}));
+    node.dispatchEvent(new Event('change', {bubbles:true}));
+  } else {
+    node.focus();
+  }
+  return {x, y, autocomplete: kind === 'fill' &&
+    (node.getAttribute('role') === 'combobox' || node.hasAttribute('aria-controls') ||
+      node.hasAttribute('aria-owns'))};
+}
+"""
+
+
+class Browser:
+    def __init__(self, url: str, *, text_limit: int = 3_500) -> None:
+        ensure_daemon()
+        self.text_limit = text_limit
+        self.target = cdp("Target.createTarget", url="about:blank", background=False)["targetId"]
+        self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
+        self.call(
+            "Emulation.setDeviceMetricsOverride",
+            width=1120,
+            height=780,
+            deviceScaleFactor=1,
+            mobile=False,
+        )
+        self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+        self.call("Page.navigate", url=url)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if self.evaluate("document.readyState") in {"interactive", "complete"}:
+                return
+            time.sleep(0.02)
+        self.close()
+        raise TimeoutError(f"Browser did not load {url!r} within 15 seconds")
+
+    @property
+    def url(self) -> str:
+        return self.evaluate("location.href")
+
+    def call(self, method: str, **params):
+        return cdp(method, session_id=self.session, **params)
+
+    def evaluate(self, expression: str, *, await_promise: bool = False):
+        result = self.call(
+            "Runtime.evaluate",
+            expression=expression,
+            awaitPromise=await_promise,
+            returnByValue=True,
+        )
+        if result.get("exceptionDetails"):
+            raise RuntimeError("Document changed during browser evaluation")
+        return result.get("result", {}).get("value")
+
+    def observe(self) -> BrowserSnapshot:
+        expression = f"({OBSERVE_SCRIPT})({json.dumps({'textLimit': self.text_limit})})"
+        for attempt in range(10):
+            try:
+                return decode_observation(self.evaluate(expression))
+            except RuntimeError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.02)
+        raise RuntimeError("Browser page did not settle")
+
+    def act(
+        self,
+        action: CandidateAction,
+        snapshot: BrowserSnapshot,
+        prepared_inputs: dict[str, str],
+    ) -> None:
+        before_url = self.url
+        if before_url != snapshot.url:
+            raise RuntimeError("Page navigated after observation; refusing a stale action")
+        if action.kind == ActionKind.SCROLL_DOWN:
+            self.call(
+                "Input.dispatchMouseEvent",
+                type="mouseWheel",
+                x=550,
+                y=650,
+                deltaX=0,
+                deltaY=560,
+            )
+            self._settle(action.kind)
+            return
+        if action.kind == ActionKind.SCROLL_UP:
+            self.call(
+                "Input.dispatchMouseEvent",
+                type="mouseWheel",
+                x=550,
+                y=130,
+                deltaX=0,
+                deltaY=-560,
+            )
+            self._settle(action.kind)
+            return
+        if action.kind == ActionKind.BACK:
+            try:
+                self.evaluate("history.back(); true")
+                self._settle(action.kind, before_url=before_url, expect_navigation=True)
+            except Exception as error:
+                raise ExecutionUncertain(
+                    "History navigation may have executed; inspect before retrying"
+                ) from error
+            return
+        if action.kind == ActionKind.WAIT:
+            time.sleep(0.1)
+            return
+        if action.kind in {ActionKind.DONE, ActionKind.BLOCKED}:
+            return
+        if not action.element_id:
+            raise ValueError(f"{action.kind} requires an observed element")
+
+        element = next(
+            (item for item in snapshot.elements if item.element_id == action.element_id), None
+        )
+        if element is None:
+            raise RuntimeError("Observed target is absent from the bound snapshot")
+        if action.kind == ActionKind.FILL and action.input_key not in prepared_inputs:
+            raise RuntimeError("Prepared input is unavailable")
+        request = {
+            "nodeId": int(action.element_id.removeprefix("e")),
+            "expectedGuard": element.guard,
+            "kind": action.kind.value,
+            "selectLabel": action.option if action.kind == ActionKind.SELECT else None,
+            "selectValue": action.option_value if action.kind == ActionKind.SELECT else None,
+        }
+        try:
+            target = self.evaluate(f"({VALIDATE_TARGET_SCRIPT})({json.dumps(request)})")
+        except RuntimeError as error:
+            if action.kind == ActionKind.SELECT:
+                raise ExecutionUncertain(
+                    "Dropdown change may have executed; inspect before retrying"
+                ) from error
+            raise
+        if target is None:
+            raise RuntimeError("Observed target changed, became hidden, or is covered")
+        try:
+            if action.kind == ActionKind.CLICK:
+                for event in ("mousePressed", "mouseReleased"):
+                    self.call(
+                        "Input.dispatchMouseEvent",
+                        type=event,
+                        x=target["x"],
+                        y=target["y"],
+                        button="left",
+                        clickCount=1,
+                    )
+            elif action.kind == ActionKind.FILL:
+                modifiers = 4 if sys.platform == "darwin" else 2
+                for event in ("keyDown", "keyUp"):
+                    self.call(
+                        "Input.dispatchKeyEvent",
+                        type=event,
+                        key="a",
+                        code="KeyA",
+                        modifiers=modifiers,
+                        commands=["selectAll"] if event == "keyDown" else [],
+                    )
+                self.call("Input.insertText", text=prepared_inputs[action.input_key])
+                if element.input_type == "search":
+                    for event in ("keyDown", "keyUp"):
+                        self.call("Input.dispatchKeyEvent", type=event, key="Enter", code="Enter")
+            elif action.kind != ActionKind.SELECT:
+                raise ValueError(f"Unsupported action kind: {action.kind}")
+            self._settle(
+                action.kind,
+                before_url=before_url,
+                expect_navigation=bool(action.target_url and action.target_url != before_url),
+                autocomplete=bool(target.get("autocomplete")),
+            )
+        except ExecutionUncertain:
+            raise
+        except Exception as error:
+            raise ExecutionUncertain(
+                "Browser input started but completion could not be confirmed; inspect before retrying"
+            ) from error
+
+    def _settle(
+        self,
+        kind: ActionKind,
+        *,
+        before_url: str | None = None,
+        expect_navigation: bool = False,
+        autocomplete: bool = False,
+    ) -> None:
+        if kind == ActionKind.FILL:
+            self.evaluate(
+                f"""new Promise((resolve) => {{
+                  let frames = 0, stopped = false;
+                  const finish = () => {{ stopped = true; resolve(); }};
+                  setTimeout(finish, {200 if autocomplete else 50});
+                  const check = () => {{
+                    if (stopped) return;
+                    frames += 1;
+                    const option = Array.from(document.querySelectorAll('[role="option"]')).some((node) => {{
+                      const rect = node.getBoundingClientRect();
+                      return rect.width && rect.height && rect.bottom > 0 && rect.top < innerHeight;
+                    }});
+                    if (frames >= 2 && ({str(autocomplete).lower()} ? option : true)) finish();
+                    else requestAnimationFrame(check);
+                  }};
+                  requestAnimationFrame(check);
+                }})""",
+                await_promise=True,
+            )
+            return
+        if expect_navigation and before_url:
+            self._wait_for_navigation(before_url)
+            return
+        try:
+            self.evaluate(
+                "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+                await_promise=True,
+            )
+        except RuntimeError:
+            pass
+
+    def _wait_for_navigation(self, before_url: str, timeout_seconds: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                current_url = self.url
+                if current_url != before_url:
+                    if self.evaluate("document.readyState") in {"interactive", "complete"}:
+                        return
+            except RuntimeError:
+                pass
+            time.sleep(0.02)
+
+    def close(self) -> None:
+        if self.target:
+            cdp("Target.closeTarget", targetId=self.target)
+            self.target = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.close()

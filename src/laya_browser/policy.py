@@ -1,0 +1,103 @@
+"""Deterministic safety shield for model-proposed browser actions."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
+from urllib.parse import urlparse
+
+from .models import (
+    ActionKind,
+    BrowserSnapshot,
+    CandidateAction,
+    ModelDecision,
+    PolicyDecision,
+    StepRecord,
+)
+
+RISKY_PATTERN = re.compile(
+    r"\b(delete|remove|purchase|buy|pay|checkout|transfer|send money|confirm order|"
+    r"publish|post|submit application|close account|unsubscribe)\b",
+    re.IGNORECASE,
+)
+
+
+class SafetyPolicy:
+    def __init__(self, allowed_domains: frozenset[str], *, allow_risky: bool = False) -> None:
+        self.allowed_domains = allowed_domains
+        self.allow_risky = allow_risky
+
+    def _reason_blocked(
+        self,
+        action: CandidateAction,
+        snapshot: BrowserSnapshot,
+        elements: Mapping[str, object],
+    ) -> str | None:
+        if action.target_url:
+            target = urlparse(action.target_url)
+            if target.scheme not in {"http", "https"}:
+                return "non-HTTP navigation is blocked"
+            if target.hostname not in self.allowed_domains:
+                return f"navigation to unapproved domain {target.hostname!r} is blocked"
+        if action.element_id:
+            element = elements.get(action.element_id)
+            if element is None:
+                return "selected element is absent from the current observation"
+            input_type = getattr(element, "input_type", "")
+            if input_type in {"password", "file"}:
+                return f"{input_type} inputs are never controlled by this runtime"
+        if not self.allow_risky and RISKY_PATTERN.search(action.description):
+            return "destructive or financial action requires explicit --allow-risky"
+        if action.kind in {ActionKind.DONE, ActionKind.BLOCKED}:
+            return None
+        if urlparse(snapshot.url).hostname not in self.allowed_domains:
+            return "the current page is outside the approved domains"
+        return None
+
+    def choose(
+        self,
+        *,
+        decision: ModelDecision,
+        actions: Sequence[CandidateAction],
+        snapshot: BrowserSnapshot,
+        history: Sequence[StepRecord],
+    ) -> PolicyDecision:
+        by_id = {action.action_id: action for action in actions}
+        elements = {element.element_id: element for element in snapshot.elements}
+        recent_noops = {
+            row.executed_action for row in history[-3:] if row.executed_action and not row.changed
+        }
+        fallback = sorted(
+            decision.probabilities,
+            key=lambda action_id: decision.probabilities[action_id],
+            reverse=True,
+        )
+        ranked = [
+            decision.proposed_action,
+            *(action_id for action_id in fallback if action_id != decision.proposed_action),
+        ]
+        rejected: list[str] = []
+        for action_id in ranked:
+            action = by_id.get(action_id)
+            if action is None:
+                rejected.append(f"{action_id}: not in observed action space")
+                continue
+            reason = self._reason_blocked(action, snapshot, elements)
+            if reason:
+                rejected.append(f"{action_id}: {reason}")
+                continue
+            if action_id in recent_noops and len(ranked) > 1:
+                rejected.append(f"{action_id}: recent no-op")
+                continue
+            return PolicyDecision(
+                proposed_action=decision.proposed_action,
+                executed_action=action_id,
+                intervened=action_id != decision.proposed_action,
+                reason="; ".join(rejected) if rejected else None,
+            )
+        return PolicyDecision(
+            proposed_action=decision.proposed_action,
+            executed_action=None,
+            intervened=True,
+            reason="No policy-approved action remained: " + "; ".join(rejected),
+        )

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "laya-browser"
+version = "0.1.0"
+description = "Fast local browser control powered by Laya typed decisions"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
+authors = [{ name = "Aryan Confity" }]
+keywords = ["laya", "browser-agent", "browser-automation", "local-ai", "typed-decisions"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
+dependencies = [
+  "browser-harness==0.1.13",
+  "laya-mlx==0.1.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[project.urls]
+Repository = "https://github.com/aryan-confity/laya-browser"
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "pytest>=8", "ruff>=0.12"]
+
+[project.scripts]
+laya-browser = "laya_browser.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/laya_browser"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
