@@ -6,9 +6,10 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import replace
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
 
 from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedElement, ObservedOption
+from .task_progress import step_requests_submission
 
 OBSERVE_SCRIPT = r"""
 ({ textLimit }) => {
@@ -130,6 +131,8 @@ OBSERVE_SCRIPT = r"""
       length += value.length;
     }
   }
+  const alerts = Array.from(document.querySelectorAll('[role="alert"],[aria-live="assertive"]'))
+    .filter(visible).map((node) => normal(node.innerText || node.textContent)).filter(Boolean).slice(0, 10);
   return {
     url: location.href,
     title: document.title || '',
@@ -138,6 +141,7 @@ OBSERVE_SCRIPT = r"""
     can_scroll_up: scrollY > 0,
     can_scroll_down: scrollY + innerHeight < document.documentElement.scrollHeight - 2,
     can_go_back: Boolean(document.referrer),
+    alerts,
   };
 }
 """
@@ -163,6 +167,7 @@ def decode_observation(raw: dict | None) -> BrowserSnapshot:
         can_scroll_up=bool(raw.get("can_scroll_up")),
         can_scroll_down=bool(raw.get("can_scroll_down")),
         can_go_back=bool(raw.get("can_go_back")),
+        alerts=tuple(raw.get("alerts", ())),
     )
 
 
@@ -188,6 +193,14 @@ GOAL_STOPWORDS = {
     "go",
     "google",
     "in",
+    "it",
+    "its",
+    "him",
+    "her",
+    "his",
+    "them",
+    "that",
+    "this",
     "navigate",
     "of",
     "on",
@@ -268,6 +281,19 @@ def _prepared_value_is_satisfied(input_key: str, actual: str, expected: str) -> 
     return False
 
 
+def _url_has_submitted_value(url: str, value: str) -> bool:
+    expected = " ".join(value.casefold().split())
+    if not expected:
+        return False
+    parsed = urlparse(url)
+    candidates = [candidate for _, candidate in parse_qsl(parsed.query)]
+    if "?" in parsed.fragment:
+        candidates.extend(
+            candidate for _, candidate in parse_qsl(parsed.fragment.split("?", 1)[1])
+        )
+    return any(" ".join(candidate.casefold().split()) == expected for candidate in candidates)
+
+
 def build_actions(
     snapshot: BrowserSnapshot,
     goal: str,
@@ -277,6 +303,7 @@ def build_actions(
     success_url_prefix: str | None = None,
     success_url_regex: str | None = None,
     preferred_domains: frozenset[str] = frozenset(),
+    context_goal: str | None = None,
 ) -> tuple[CandidateAction, ...]:
     if include_done:
         return (
@@ -287,6 +314,7 @@ def build_actions(
             ),
         )
 
+    matching_goal = goal if _goal_terms(goal) else context_goal or goal
     ranked: list[tuple[float, CandidateAction]] = []
     strong_action_ids: set[str] = set()
     for element in snapshot.elements:
@@ -303,10 +331,10 @@ def build_actions(
             and urlparse(target_url).hostname in preferred_domains
         )
         verifier_match = prefix_match or regex_match
-        score = _score(element, goal) + (40 if verifier_match else 0) + (
+        score = _score(element, matching_goal) + (40 if verifier_match else 0) + (
             30 if preferred_match else 0
         )
-        label_goal_match = bool(_matched_goal_terms(element, goal))
+        label_goal_match = bool(_matched_goal_terms(element, matching_goal))
         goal_match = label_goal_match or verifier_match
         verifier_fact = (
             " Destination matches the required success URL: YES."
@@ -345,20 +373,25 @@ def build_actions(
                             + progress_fact
                             + verifier_fact
                             + preferred_fact
-                            + _goal_match(element, goal),
+                            + _goal_match(element, matching_goal),
                             element.element_id,
                             input_key=input_key,
                             goal_match=goal_match or prepared_goal_match,
                         ),
                     )
                 )
-            if element.submit_on_enter and element.value:
+            if (
+                element.submit_on_enter
+                and element.value
+                and step_requests_submission(goal)
+                and not _url_has_submitted_value(snapshot.url, element.value)
+            ):
                 action = CandidateAction(
                     f"submit_{element.element_id}",
                     ActionKind.PRESS_ENTER,
                     f"Submit the current search from {element.semantic_description}. "
                     "Deterministic planner: the field has a value and still needs submission: YES."
-                    + _goal_match(element, goal),
+                    + _goal_match(element, matching_goal),
                     element.element_id,
                     goal_match=True,
                 )
@@ -373,7 +406,7 @@ def build_actions(
                         f"Open or focus {element.semantic_description}."
                         + verifier_fact
                         + preferred_fact
-                        + _goal_match(element, goal),
+                        + _goal_match(element, matching_goal),
                         element.element_id,
                         goal_match=goal_match,
                     ),
@@ -390,7 +423,7 @@ def build_actions(
             ]
             for index, option in options:
                 option_goal_match = bool(
-                    _goal_terms(goal) & _tokens(option.label)
+                    _goal_terms(matching_goal) & _tokens(option.label)
                 ) or desired is not None
                 ranked.append(
                     (
@@ -401,7 +434,7 @@ def build_actions(
                             f"Select '{option.label}' in {element.description}."
                             + verifier_fact
                             + preferred_fact
-                            + _goal_match(element, goal),
+                            + _goal_match(element, matching_goal),
                             element.element_id,
                             option=option.label,
                             option_value=option.value,
@@ -416,7 +449,7 @@ def build_actions(
                 f"Activate {element.description}."
                 + verifier_fact
                 + preferred_fact
-                + _goal_match(element, goal),
+                + _goal_match(element, matching_goal),
                 element.element_id,
                 target_url=target_url,
                 goal_match=goal_match or preferred_match,

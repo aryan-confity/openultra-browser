@@ -14,6 +14,8 @@ from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
 from .task_progress import (
     TaskProgress,
+    error_blocks_progress,
+    login_blocks_progress,
     step_completion_disposition,
     summarize_page_change,
 )
@@ -90,6 +92,7 @@ class BrowserAgent:
                         success_url_prefix=self.config.success_url_prefix,
                         success_url_regex=self.config.success_url_regex,
                         preferred_domains=self.config.preferred_domains,
+                        context_goal=self.config.goal,
                     )
                     decision = self.engine.decide(
                         goal=self.config.goal,
@@ -98,7 +101,7 @@ class BrowserAgent:
                         actions=actions,
                         history=history,
                     )
-                    if history and decision.error_probability >= 0.8:
+                    if history and error_blocks_progress(decision, snapshot, actions):
                         status = "error"
                         reason = "The current page visibly rejects or errors after the last action"
                         break
@@ -126,8 +129,14 @@ class BrowserAgent:
                             snapshot, action_count=len(history)
                         )
                         continue
+                    if login_blocks_progress(decision, actions):
+                        status = "needs_login"
+                        reason = (
+                            "The current outcome requires authentication in the isolated browser profile"
+                        )
+                        break
                     break
-                if status == "error":
+                if status in {"error", "needs_login"}:
                     break
                 policy = self.policy.choose(
                     decision=decision,

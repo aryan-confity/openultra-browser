@@ -1,11 +1,17 @@
+from dataclasses import replace
+
 from openultra_browser.models import (
+    ActionKind,
     BrowserSnapshot,
+    CandidateAction,
     ModelDecision,
     ObservedElement,
     StepRecord,
 )
 from openultra_browser.task_progress import (
     TaskProgress,
+    error_blocks_progress,
+    login_blocks_progress,
     split_task_steps,
     step_completion_disposition,
     summarize_page_change,
@@ -143,9 +149,84 @@ def test_exploration_change_cannot_unlock_step_confirmation():
     assert disposition == "pending"
 
 
+def test_filling_search_does_not_complete_it_before_submission():
+    progress = TaskProgress(("Search for Neon AI stream",), history_boundary=0)
+
+    disposition = step_completion_disposition(
+        progress, decision(0.99), (record("fill"),)
+    )
+
+    assert disposition == "pending"
+
+
+def test_click_navigation_is_authoritative_for_an_explicit_click_step():
+    progress = TaskProgress(("click on it",), history_boundary=0)
+    click = record("click")
+    click.change_summary = "URL changed: https://example.com/results -> https://example.com/watch"
+
+    assert step_completion_disposition(progress, decision(0.1), (click,)) == "verified"
+
+
+def test_navigation_does_not_claim_a_stateful_dislike_step_completed():
+    progress = TaskProgress(("dislike his video",), history_boundary=0)
+    click = record("click")
+    click.change_summary = "URL changed: https://example.com/watch -> https://accounts.example.com"
+
+    assert step_completion_disposition(progress, decision(0.1), (click,)) == "pending"
+
+
 def test_semantic_change_with_mid_confidence_requests_focused_confirmation():
     progress = TaskProgress(("Click Inquire",), history_boundary=0)
 
     disposition = step_completion_disposition(progress, decision(0.7), (record("click"),))
 
     assert disposition == "confirm"
+
+
+def test_optional_login_does_not_block_a_direct_semantic_action():
+    model = replace(decision(0.0), login_probability=0.8)
+    submit = CandidateAction(
+        "submit_search",
+        ActionKind.PRESS_ENTER,
+        "Submit search",
+        "e1",
+        goal_match=True,
+    )
+
+    assert not login_blocks_progress(model, (submit,))
+
+
+def test_login_blocks_when_no_direct_semantic_action_remains():
+    model = replace(decision(0.0), login_probability=0.8)
+    scroll = CandidateAction(
+        "scroll_down", ActionKind.SCROLL_DOWN, "Scroll down", goal_match=True
+    )
+
+    assert login_blocks_progress(model, (scroll,))
+
+
+def test_model_error_does_not_block_without_browser_alert_evidence():
+    model = replace(decision(0.0), error_probability=0.9)
+    page = snapshot("https://example.com")
+
+    assert not error_blocks_progress(model, page, ())
+
+
+def test_browser_alert_blocks_when_no_recovery_action_remains():
+    model = replace(decision(0.0), error_probability=0.9)
+    page = replace(snapshot("https://example.com"), alerts=("Request rejected",))
+    scroll = CandidateAction(
+        "scroll_down", ActionKind.SCROLL_DOWN, "Scroll down", goal_match=True
+    )
+
+    assert error_blocks_progress(model, page, (scroll,))
+
+
+def test_browser_alert_does_not_block_a_direct_recovery_action():
+    model = replace(decision(0.0), error_probability=0.9)
+    page = replace(snapshot("https://example.com"), alerts=("Required field",))
+    fill = CandidateAction(
+        "fill_name", ActionKind.FILL, "Fill name", "e1", goal_match=True
+    )
+
+    assert not error_blocks_progress(model, page, (fill,))

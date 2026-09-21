@@ -64,6 +64,20 @@ class BackEngine:
         )
 
 
+class LoginEngine:
+    def decide(self, **_kwargs):
+        return ModelDecision(
+            proposed_action="wait",
+            probabilities={"wait": 1.0},
+            confidence=1.0,
+            goal_probability=0.0,
+            stuck_probability=0.0,
+            inference_ms=1.0,
+            input_tokens=10,
+            login_probability=0.95,
+        )
+
+
 class UncertainBrowser(FakeBrowser):
     def __init__(self, url, *, text_limit):
         super().__init__(url, text_limit=text_limit)
@@ -167,3 +181,14 @@ def test_pre_input_staleness_reobserves_without_marking_action_executed():
     assert len(result.steps) == 1
     assert result.steps[0].executed_action is None
     assert result.steps[0].action_error.startswith("StalePage:")
+
+
+def test_authentication_boundary_stops_without_attempting_credentials():
+    result = BrowserAgent(
+        RunConfig(goal="Dislike this video", start_url="https://example.com/done"),
+        decision_engine=LoginEngine(),
+        browser_factory=FakeBrowser,
+    ).run()
+
+    assert result.status == "needs_login"
+    assert not result.steps

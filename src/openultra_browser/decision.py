@@ -190,6 +190,17 @@ class OpenUltraDecisionEngine:
                     "true": "A visible busy/loading state is preventing the needed control from appearing.",
                 },
             },
+            "login": {
+                "type": "noul",
+                "instructions": (
+                    "Does completing the current required step require signing in or signing up "
+                    "on this page before progress can continue? Ignore optional account links."
+                ),
+                "criteria": {
+                    "false": "The current required step can proceed without authentication.",
+                    "true": "Authentication is required before the current step can proceed.",
+                },
+            },
         }
         if current_step:
             questions["step_completion"] = {
@@ -264,6 +275,7 @@ class OpenUltraDecisionEngine:
         stuck_probability = _validate_noul(answers["stuck"])
         error_probability = _validate_noul(answers["error"])
         loading_probability = _validate_noul(answers["loading"])
+        login_probability = _validate_noul(answers["login"])
         step_completion_probability = (
             _validate_noul(answers["step_completion"])
             if "step_completion" in questions
@@ -292,6 +304,7 @@ class OpenUltraDecisionEngine:
             completion_change_probability=completion_change_probability,
             error_probability=error_probability,
             loading_probability=loading_probability,
+            login_probability=login_probability,
             step_completion_probability=step_completion_probability,
             step_completion_change_probability=step_completion_change_probability,
         )

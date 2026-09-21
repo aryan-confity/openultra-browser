@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from .models import BrowserSnapshot, ModelDecision, StepRecord
+from .models import ActionKind, BrowserSnapshot, CandidateAction, ModelDecision, StepRecord
 
 ACTION_VERBS = (
     r"go|open|click|select|choose|find|get|visit|navigate|search|show|read|view|fill|"
@@ -26,6 +26,14 @@ DOMAIN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NAVIGATION_PREFIX = re.compile(r"^\s*(?:go|visit|navigate)\b", re.IGNORECASE)
+
+
+def step_requests_submission(step: str) -> bool:
+    return bool(
+        re.search(r"\b(?:search|find|lookup|submit)\b", step, re.IGNORECASE)
+    )
+
+
 def split_task_steps(goal: str) -> tuple[str, ...]:
     """Split explicit ordered action clauses without inventing a plan."""
     raw = [part.strip(" ,.;") for part in STEP_BOUNDARY.split(goal) if part.strip(" ,.;")]
@@ -132,11 +140,31 @@ def step_completion_disposition(
     """Return verified, confirm, or pending for the active atomic outcome."""
     if not progress.current_step:
         return "pending"
+    has_current_step_action = len(history) > progress.history_boundary
+    if has_current_step_action:
+        latest = history[-1]
+        if (
+            latest.action_kind == ActionKind.CLICK.value
+            and latest.changed
+            and latest.change_summary
+            and "URL changed:" in latest.change_summary
+            and re.match(
+                r"^\s*(?:click|open|visit|navigate|go)\b",
+                progress.current_step,
+                re.IGNORECASE,
+            )
+        ):
+            return "verified"
     probability = max(
         decision.step_completion_probability,
         decision.step_completion_change_probability,
     )
-    has_current_step_action = len(history) > progress.history_boundary
+    if (
+        has_current_step_action
+        and history[-1].action_kind == ActionKind.FILL.value
+        and step_requests_submission(progress.current_step)
+    ):
+        return "pending"
     threshold = 0.85 if has_current_step_action else 0.9
     if probability >= threshold:
         return "verified"
@@ -149,3 +177,39 @@ def step_completion_disposition(
     ):
         return "confirm"
     return "pending"
+
+
+def login_blocks_progress(
+    decision: ModelDecision, actions: Sequence[CandidateAction]
+) -> bool:
+    """Treat authentication as blocking only when no direct semantic action remains."""
+    if decision.login_probability < 0.7:
+        return False
+    semantic_kinds = {
+        ActionKind.CLICK,
+        ActionKind.FILL,
+        ActionKind.PRESS_ENTER,
+        ActionKind.SELECT,
+    }
+    return not any(
+        action.goal_match and action.kind in semantic_kinds for action in actions
+    )
+
+
+def error_blocks_progress(
+    decision: ModelDecision,
+    snapshot: BrowserSnapshot,
+    actions: Sequence[CandidateAction],
+) -> bool:
+    """Require browser-owned rejection evidence before treating an error as terminal."""
+    if decision.error_probability < 0.8 or not snapshot.alerts:
+        return False
+    semantic_kinds = {
+        ActionKind.CLICK,
+        ActionKind.FILL,
+        ActionKind.PRESS_ENTER,
+        ActionKind.SELECT,
+    }
+    return not any(
+        action.goal_match and action.kind in semantic_kinds for action in actions
+    )

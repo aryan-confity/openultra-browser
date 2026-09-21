@@ -15,6 +15,8 @@ from .policy import SafetyPolicy
 from .progress import repeats_action_cycle
 from .task_progress import (
     TaskProgress,
+    error_blocks_progress,
+    login_blocks_progress,
     step_completion_disposition,
     summarize_page_change,
 )
@@ -23,6 +25,7 @@ TERMINAL_STATUSES = {
     "completed",
     "blocked",
     "needs_verification",
+    "needs_login",
     "max_steps",
     "timeout",
     "stuck",
@@ -131,6 +134,7 @@ class InteractiveAgent:
             success_url_prefix=self.config.success_url_prefix,
             success_url_regex=self.config.success_url_regex,
             preferred_domains=self.config.preferred_domains,
+            context_goal=self.config.goal,
         )
 
     def predict(self) -> dict[str, Any]:
@@ -149,7 +153,9 @@ class InteractiveAgent:
                 actions=self.actions,
                 history=self.history,
             )
-            if self.history and self.decision.error_probability >= 0.8:
+            if self.history and error_blocks_progress(
+                self.decision, self.snapshot, self.actions
+            ):
                 self.status = "error"
                 self.reason = "The current page visibly rejects or errors after the last action"
                 self.actions = ()
@@ -180,6 +186,13 @@ class InteractiveAgent:
                 self.decision = None
                 self.policy_result = None
                 continue
+            if login_blocks_progress(self.decision, self.actions):
+                self.status = "needs_login"
+                self.reason = (
+                    "The current outcome requires authentication in the isolated browser profile"
+                )
+                self.actions = ()
+                return self.state()
             break
         self.policy_result = self.policy.choose(
             decision=self.decision,

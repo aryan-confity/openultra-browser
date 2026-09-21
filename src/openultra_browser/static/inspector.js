@@ -1,6 +1,6 @@
 const byId = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="inspector-token"]').content;
-const terminal = new Set(["completed", "blocked", "needs_verification", "max_steps", "timeout", "stuck", "error"]);
+const terminal = new Set(["completed", "blocked", "needs_verification", "needs_login", "max_steps", "timeout", "stuck", "error"]);
 let state = null;
 let busy = false;
 let automatic = false;
@@ -76,6 +76,7 @@ function render() {
     completed: "Task completed",
     blocked: "No supported action remains",
     needs_verification: "Outcome needs review",
+    needs_login: "Sign in required",
     max_steps: "Action limit reached",
     timeout: "Time limit reached",
     stuck: "No further progress",

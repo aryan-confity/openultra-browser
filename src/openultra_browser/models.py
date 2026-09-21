@@ -85,6 +85,7 @@ class BrowserSnapshot:
     can_scroll_up: bool = False
     can_scroll_down: bool = False
     can_go_back: bool = False
+    alerts: tuple[str, ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -127,6 +128,7 @@ class ModelDecision:
     completion_change_probability: float = 0.0
     error_probability: float = 0.0
     loading_probability: float = 0.0
+    login_probability: float = 0.0
     step_completion_probability: float = 0.0
     step_completion_change_probability: float = 0.0
 

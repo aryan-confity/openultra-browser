@@ -36,6 +36,7 @@ class FakeAgent:
                 "stuck": {"noul": 0.03},
                 "error": {"noul": 0.01},
                 "loading": {"noul": 0.02},
+                "login": {"noul": 0.04},
                 "step_completion": {"noul": 0.18},
                 "step_completion_change": {"noul": 0.22},
             },
@@ -77,6 +78,7 @@ def test_operation_and_compatible_target_share_one_local_batch():
         "stuck",
         "error",
         "loading",
+        "login",
         "step_completion",
         "step_completion_change",
     }
@@ -94,6 +96,7 @@ def test_operation_and_compatible_target_share_one_local_batch():
     assert result.stuck_probability == 0.03
     assert result.error_probability == 0.01
     assert result.loading_probability == 0.02
+    assert result.login_probability == 0.04
     assert result.step_completion_probability == 0.18
     assert result.step_completion_change_probability == 0.22
     step_question = fake.calls[0][1]["step_completion"]

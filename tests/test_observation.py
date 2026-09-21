@@ -1,4 +1,9 @@
-from openultra_browser.models import BrowserSnapshot, ObservedElement, ObservedOption
+from openultra_browser.models import (
+    ActionKind,
+    BrowserSnapshot,
+    ObservedElement,
+    ObservedOption,
+)
 from openultra_browser.observation import OBSERVE_SCRIPT, build_actions
 
 
@@ -77,6 +82,82 @@ def test_satisfied_prepared_fill_is_pruned_without_exposing_its_value():
     assert all("private exact query" not in action.description for action in result)
     assert result[0].kind.value == "press_enter"
     assert "still needs submission: YES" in result[0].description
+
+
+def test_search_already_represented_by_url_is_not_submitted_again():
+    current = BrowserSnapshot(
+        "https://www.youtube.com/results?search_query=Neon+AI+stream",
+        "Results",
+        "Neon AI stream",
+        (
+            ObservedElement(
+                "e1",
+                "combobox",
+                "Search",
+                "input",
+                value="Neon AI stream",
+                submit_on_enter=True,
+            ),
+            ObservedElement(
+                "e2",
+                "link",
+                "Neon AI Stream Is A Disaster",
+                "a",
+                href="/watch?v=video",
+            ),
+        ),
+    )
+
+    result = build_actions(
+        current,
+        "click on it",
+        {"search query": "Neon AI stream"},
+        8,
+        False,
+        context_goal=(
+            "Go to youtube.com and search for Neon AI stream and click on it "
+            "and dislike his video"
+        ),
+    )
+
+    action_ids = {action.action_id for action in result}
+    assert "submit_e1" not in action_ids
+    assert "click_e2" in action_ids
+    assert "click_e1" not in action_ids
+
+
+def test_retained_search_field_cannot_hijack_a_later_click_step():
+    current = BrowserSnapshot(
+        "https://www.youtube.com/watch?v=video",
+        "Video",
+        "Video page",
+        (
+            ObservedElement(
+                "search",
+                "combobox",
+                "Search",
+                "input",
+                value="Neon AI stream",
+                submit_on_enter=True,
+            ),
+            ObservedElement("dislike", "button", "Dislike", "button", pressed=False),
+        ),
+    )
+
+    result = build_actions(
+        current,
+        "click on it",
+        {"search query": "Neon AI stream"},
+        20,
+        False,
+        context_goal=(
+            "Go to youtube.com and search for Neon AI stream and click on it "
+            "and dislike his video"
+        ),
+    )
+
+    assert not any(action.kind == ActionKind.PRESS_ENTER for action in result)
+    assert any(action.element_id == "dislike" for action in result)
 
 
 def test_observer_marks_form_associated_search_textareas_as_submittable():
