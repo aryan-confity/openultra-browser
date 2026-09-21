@@ -225,9 +225,16 @@ function finalizeVoiceTranscript(transcript) {
 
 function listenForTask(command) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
+  const safari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+  const brave = Boolean(navigator.brave && typeof navigator.brave.isBrave === "function");
+  if (!SpeechRecognition || safari || brave) {
     voiceFallbackCommand = command;
-    byId("error").textContent = "Live voice needs Chrome or Edge speech recognition. You can still type or paste the transcript and run it.";
+    byId("voice-label").textContent = "Transcript fallback";
+    byId("error").textContent = brave
+      ? "Brave exposes the speech API but does not yet provide a working recognition engine. Open OpenUltra in Chrome or Edge, or type the transcript and run it."
+      : safari
+        ? "Safari's speech service is unavailable for live voice here. This local address is secure; open OpenUltra in Chrome or Edge, or type the transcript and run it."
+        : "Live voice needs Chrome or Edge speech recognition. You can still type or paste the transcript and run it.";
     byId("error").hidden = false;
     updateTranscriptFallback(true);
     return;
@@ -282,7 +289,7 @@ function listenForTask(command) {
     }
     stopVoice({ preserveSession: false });
     byId("error").textContent = event.error === "network"
-      ? "Browser speech recognition is unavailable. Run the captured transcript below, or open OpenUltra in Chrome or Edge for live voice."
+      ? "The browser speech service could not connect. This is not caused by localhost or missing HTTPS. Run the captured transcript, or use Chrome or Edge for live voice."
       : `Voice input failed: ${event.error || "unknown error"}. You can still run the captured transcript.`;
     byId("error").hidden = false;
     if (remaining) updateTranscriptFallback(true);

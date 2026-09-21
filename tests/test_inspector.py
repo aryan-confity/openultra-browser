@@ -47,6 +47,10 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert 'id="cancel-voice"' in html
     assert 'id="run-transcript"' in html
     assert "window.SpeechRecognition || window.webkitSpeechRecognition" in script
+    assert "navigator.brave.isBrave" in script
+    assert "does not yet provide a working recognition engine" in script
+    assert "This local address is secure" in script
+    assert "not caused by localhost or missing HTTPS" in script
     assert "nextRecognition.continuous = true" in script
     assert 'fetch("/api/voice-plan"' in script
     assert "Acting while you speak" in script
