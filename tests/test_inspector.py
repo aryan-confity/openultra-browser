@@ -52,6 +52,12 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert "This local address is secure" in script
     assert "not caused by localhost or missing HTTPS" in script
     assert "nextRecognition.continuous = true" in script
+    assert "event.resultIndex" in script
+    assert "Listening for next command" in script
+    assert "startRecognitionCycle(SpeechRecognition, generation)" in script
+    assert "voiceRestartTimer = setTimeout" in script
+    assert 'voiceSession.nextCommand = "retask"' in script
+    assert "voiceSession.tasks.push" in script
     assert 'fetch("/api/voice-plan"' in script
     assert "Acting while you speak" in script
     assert "Run the captured transcript" in script

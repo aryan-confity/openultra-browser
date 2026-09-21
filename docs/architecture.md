@@ -114,9 +114,12 @@ The task input can use text or the browser's Web Speech API. Voice recognition i
 not a second agent. Debounced partial speech receives one local typed-decision batch for command
 kind and completeness. Deterministic and model agreement can commit only a reversible closed-set
 first step; payload-bearing and consequential actions wait for final speech. A committed prefix is
-consumed once, and later words in the same utterance are retasked from the resulting page. Stale
-partial decisions cannot execute. Audio is not sent to the OpenUltra server. If browser speech
-recognition is unavailable, the captured or typed transcript remains directly runnable.
+consumed once, and later words in the same utterance are retasked from the resulting page. Distinct
+recognizer result indices become ordered utterances in a FIFO task queue. The microphone session
+survives final results and automatically replaces browser recognizers that end after silence; it
+ends only on explicit cancellation, a mode switch, or a fatal recognition error. Stale partial
+decisions cannot execute. Audio is not sent to the OpenUltra server. If browser speech recognition
+is unavailable, the captured or typed transcript remains directly runnable.
 
 A read-only frame endpoint captures browser pixels independently from DOM observation. It uses the
 same nonblocking browser lock as commands, so preview refreshes cannot race prediction or input.

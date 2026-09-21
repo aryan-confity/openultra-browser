@@ -110,9 +110,11 @@ Voice mode uses the browser's Web Speech API and streams debounced partial trans
 local Laya command-type/completeness batch. A reversible closed-set first step can begin before the
 speaker finishes; searches, field values, selections, submissions, and other side effects wait for
 the final utterance. Words spoken after an early committed step become a continuation from the
-resulting page. Stale partial decisions are ignored. If browser speech recognition is unavailable,
-the captured or typed transcript remains runnable instead of stranding the task. Live recognition
-requires Chrome or Edge support for the Web Speech API.
+resulting page. Each finished sentence is queued as a distinct continuation while the microphone
+keeps listening, and Chrome recognition sessions that end after silence are restarted until the
+user cancels voice mode. Stale partial decisions are ignored. If browser speech recognition is
+unavailable, the captured or typed transcript remains runnable instead of stranding the task. Live
+recognition requires Chrome or Edge support for the Web Speech API.
 
 Task-first inspector runs may follow observed HTTP(S) links across sites because their eventual
 destination is not known before the task starts. Password and file inputs, non-HTTP destinations,

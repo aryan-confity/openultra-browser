@@ -16,6 +16,7 @@ let voicePlanTimer = null;
 let voicePlanInFlight = false;
 let voicePlanQueued = null;
 let voiceFallbackCommand = "reset";
+let voiceRestartTimer = null;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -115,6 +116,8 @@ function clearVoicePlanning() {
 
 function stopVoice({ cancelled = false, preserveSession = false } = {}) {
   voiceListening = false;
+  clearTimeout(voiceRestartTimer);
+  voiceRestartTimer = null;
   try { recognition?.stop(); } catch { /* The recognizer may already be stopped. */ }
   recognition = null;
   clearVoicePlanning();
@@ -156,19 +159,26 @@ async function flushVoicePlan() {
     const plan = await postVoicePlan(request.transcript);
     if (
       voiceSession?.generation === request.generation
+      && voiceSession.utteranceId === request.utteranceId
       && voiceSession.listening
       && !voiceSession.committedText
-      && !voiceSession.final
       && plan.decision === "act"
     ) {
       voiceSession.committedText = plan.candidate;
       byId("voice-label").textContent = "Acting while you speak";
-      void executeVoiceTask(voiceSession.command, plan.candidate);
-    } else if (voiceSession?.generation === request.generation && voiceSession.listening) {
+      enqueueVoiceTask(plan.candidate);
+    } else if (
+      voiceSession?.generation === request.generation
+      && voiceSession.utteranceId === request.utteranceId
+      && voiceSession.listening
+    ) {
       byId("voice-label").textContent = "Listening";
     }
   } catch (error) {
-    if (voiceSession?.generation === request.generation) {
+    if (
+      voiceSession?.generation === request.generation
+      && voiceSession.utteranceId === request.utteranceId
+    ) {
       byId("voice-label").textContent = "Listening";
       byId("error").textContent = error.message;
       byId("error").hidden = false;
@@ -179,48 +189,119 @@ async function flushVoicePlan() {
   }
 }
 
-function scheduleVoicePlan(transcript, generation) {
+function scheduleVoicePlan(transcript, generation, utteranceId) {
   clearTimeout(voicePlanTimer);
-  voicePlanQueued = { transcript, generation };
+  voicePlanQueued = { transcript, generation, utteranceId };
   voicePlanTimer = setTimeout(() => void flushVoicePlan(), 200);
 }
 
-async function executeVoiceTask(command, goal) {
-  if (!goal.trim()) return;
-  if (busy) {
-    if (voiceSession) voiceSession.pendingTask = { command, goal };
-    return;
-  }
-  await startTask(command, goal);
-  if (voiceSession?.pendingTask && !busy) {
-    const pending = voiceSession.pendingTask;
-    voiceSession.pendingTask = null;
-    await executeVoiceTask(pending.command, pending.goal);
+async function drainVoiceTasks(session) {
+  if (session.draining) return;
+  session.draining = true;
+  try {
+    while (session.tasks.length) {
+      const task = session.tasks.shift();
+      await startTask(task.command, task.goal);
+      if (voiceSession !== session) break;
+    }
+  } finally {
+    session.draining = false;
+    if (voiceSession === session && voiceListening) {
+      byId("voice-label").textContent = "Listening for next command";
+      setControls();
+    }
   }
 }
 
-function finalizeVoiceTranscript(transcript) {
-  if (!voiceSession || voiceSession.final) return;
-  voiceSession.final = true;
-  voiceSession.listening = false;
+function enqueueVoiceTask(goal) {
+  if (!voiceSession || !goal.trim()) return;
+  const command = voiceSession.nextCommand;
+  voiceSession.nextCommand = "retask";
+  voiceFallbackCommand = "retask";
+  voiceSession.tasks.push({ command, goal: goal.trim() });
+  void drainVoiceTasks(voiceSession);
+}
+
+function finishVoiceUtterance(transcript, utteranceId) {
+  if (!voiceSession || voiceSession.utteranceId !== utteranceId) return;
   const committed = voiceSession.committedText;
   const tail = committed ? transcriptTail(transcript, committed) : transcript;
   clearVoicePlanning();
-  try { recognition?.stop(); } catch { /* The recognizer may already be stopped. */ }
-  recognition = null;
-  voiceListening = false;
-  byId("cancel-voice").hidden = true;
-  byId("voice-state").classList.remove("listening");
   if (committed && !tail) {
-    byId("voice-label").textContent = "Spoken command committed";
+    byId("voice-label").textContent = "Listening for next command";
   } else if (tail) {
     byId("voice-label").textContent = committed ? "Continuing spoken task" : "Task captured";
-    const command = committed ? "retask" : voiceSession.command;
-    voiceSession.pendingTask = { command, goal: tail };
-    void executeVoiceTask(command, tail);
+    enqueueVoiceTask(tail);
   }
+  voiceSession.utteranceId += 1;
+  voiceSession.committedText = "";
+  voiceSession.latestTranscript = "";
   updateTranscriptFallback();
   setControls();
+}
+
+function startRecognitionCycle(SpeechRecognition, generation) {
+  if (!voiceListening || voiceSession?.generation !== generation) return;
+  const nextRecognition = new SpeechRecognition();
+  recognition = nextRecognition;
+  nextRecognition.continuous = true;
+  nextRecognition.interimResults = true;
+  nextRecognition.lang = "en-US";
+  nextRecognition.maxAlternatives = 1;
+
+  nextRecognition.onresult = (event) => {
+    if (generation !== voiceGeneration || recognition !== nextRecognition) return;
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index];
+      const transcript = (result[0]?.transcript || "").replace(/\s+/g, " ").trim();
+      if (!transcript || !voiceSession) continue;
+      const utteranceId = voiceSession.utteranceId;
+      byId("goal").value = transcript;
+      voiceSession.latestTranscript = transcript;
+      updateTranscriptFallback();
+      if (result.isFinal) finishVoiceUtterance(transcript, utteranceId);
+      else if (!voiceSession.committedText) {
+        scheduleVoicePlan(transcript, generation, utteranceId);
+      }
+    }
+  };
+  nextRecognition.onerror = (event) => {
+    if (generation !== voiceGeneration || recognition !== nextRecognition) return;
+    if (event.error === "no-speech" || event.error === "aborted") {
+      byId("voice-label").textContent = "Listening for next command";
+      return;
+    }
+    const captured = voiceSession?.latestTranscript || byId("goal").value.trim();
+    stopVoice({ preserveSession: false });
+    byId("error").textContent = event.error === "network"
+      ? "The browser speech service could not connect. This is not caused by localhost or missing HTTPS. Run the captured transcript, or use Chrome or Edge for live voice."
+      : `Voice input failed: ${event.error || "unknown error"}. You can still run the captured transcript.`;
+    byId("error").hidden = false;
+    if (captured) updateTranscriptFallback(true);
+  };
+  nextRecognition.onend = () => {
+    if (generation !== voiceGeneration || recognition !== nextRecognition || !voiceListening) return;
+    const transcript = voiceSession?.latestTranscript || "";
+    if (transcript && voiceSession) {
+      finishVoiceUtterance(transcript, voiceSession.utteranceId);
+    }
+    recognition = null;
+    byId("voice-label").textContent = "Listening for next command";
+    clearTimeout(voiceRestartTimer);
+    voiceRestartTimer = setTimeout(
+      () => startRecognitionCycle(SpeechRecognition, generation),
+      120,
+    );
+  };
+  try {
+    nextRecognition.start();
+  } catch (error) {
+    if (generation !== voiceGeneration || !voiceListening) return;
+    stopVoice({ preserveSession: false });
+    byId("error").textContent = `Voice input could not start: ${error.message || "unknown error"}. You can still run a typed transcript.`;
+    byId("error").hidden = false;
+    updateTranscriptFallback(true);
+  }
 }
 
 function listenForTask(command) {
@@ -241,69 +322,24 @@ function listenForTask(command) {
   }
   stopVoice();
   const generation = ++voiceGeneration;
-  const nextRecognition = new SpeechRecognition();
-  recognition = nextRecognition;
   voiceListening = true;
   voiceFallbackCommand = command;
   voiceSession = {
     generation,
-    command,
+    nextCommand: command,
     committedText: "",
-    final: false,
+    draining: false,
     latestTranscript: "",
     listening: true,
-    pendingTask: null,
+    tasks: [],
+    utteranceId: 0,
   };
-  nextRecognition.continuous = true;
-  nextRecognition.interimResults = true;
-  nextRecognition.lang = "en-US";
-  nextRecognition.maxAlternatives = 1;
   byId("error").hidden = true;
   byId("voice-state").classList.add("listening");
   byId("voice-label").textContent = "Listening";
   byId("cancel-voice").hidden = false;
   setControls();
-
-  nextRecognition.onresult = (event) => {
-    if (generation !== voiceGeneration) return;
-    const transcript = Array.from(event.results)
-      .map((result) => result[0]?.transcript || "")
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (transcript) byId("goal").value = transcript;
-    const final = Array.from(event.results).every((result) => result.isFinal);
-    if (voiceSession) voiceSession.latestTranscript = transcript;
-    updateTranscriptFallback();
-    if (final && transcript) finalizeVoiceTranscript(transcript);
-    else if (transcript && !voiceSession?.committedText) scheduleVoicePlan(transcript, generation);
-  };
-  nextRecognition.onerror = (event) => {
-    if (generation !== voiceGeneration) return;
-    const captured = byId("goal").value.trim();
-    const committed = voiceSession?.committedText || "";
-    const remaining = committed ? transcriptTail(captured, committed) : captured;
-    if (committed) {
-      voiceFallbackCommand = "retask";
-      if (remaining) byId("goal").value = remaining;
-    }
-    stopVoice({ preserveSession: false });
-    byId("error").textContent = event.error === "network"
-      ? "The browser speech service could not connect. This is not caused by localhost or missing HTTPS. Run the captured transcript, or use Chrome or Edge for live voice."
-      : `Voice input failed: ${event.error || "unknown error"}. You can still run the captured transcript.`;
-    byId("error").hidden = false;
-    if (remaining) updateTranscriptFallback(true);
-  };
-  nextRecognition.onend = () => {
-    if (generation !== voiceGeneration || !voiceListening) return;
-    const transcript = voiceSession?.latestTranscript || byId("goal").value.trim();
-    if (transcript) finalizeVoiceTranscript(transcript);
-    else {
-      stopVoice();
-      byId("voice-label").textContent = "No speech captured";
-    }
-  };
-  nextRecognition.start();
+  startRecognitionCycle(SpeechRecognition, generation);
 }
 
 function requestTask(command) {
