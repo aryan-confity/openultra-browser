@@ -321,6 +321,33 @@ class InteractiveAgent:
             "fresh": bool(screenshot),
         }
 
+    def retask(self, config: RunConfig) -> dict[str, Any]:
+        """Start a new task state while preserving the current browser target."""
+        snapshot = self.browser.observe()
+        screenshot = self._screenshot()
+        progress = TaskProgress.from_goal(config.goal)
+        progress.sync_visible_state(snapshot)
+
+        self.config = config
+        self.policy = SafetyPolicy(
+            config.effective_allowed_domains,
+            allow_risky=config.allow_risky,
+            allow_external_navigation=config.allow_external_navigation,
+        )
+        self.started_at_epoch_ms = round(time.time() * 1_000)
+        self.started_at = time.perf_counter()
+        self.history = []
+        self.decision = None
+        self.policy_result = None
+        self.actions = ()
+        self.status = "ready"
+        self.reason = "Updated task ready on the current page"
+        self.progress = progress
+        self.snapshot = snapshot
+        self.screenshot = screenshot
+        self._refresh()
+        return self.state()
+
     def tick(self) -> dict[str, Any]:
         self.predict()
         if self.status == "predicted":

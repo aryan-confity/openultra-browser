@@ -47,10 +47,10 @@ class InspectorController:
             "run_id": None,
         }
 
-    def reset(self, body: dict) -> dict:
+    def _config(self, body: dict, *, current_url: str | None = None) -> RunConfig:
         goal = _bounded_text(body.get("goal"), "goal", 4_000)
-        planned = plan_task(goal)
-        start_url = _optional_text(body.get("url"), 2_000) or planned.start_url
+        planned = plan_task(goal, continuation=current_url is not None)
+        start_url = current_url or _optional_text(body.get("url"), 2_000) or planned.start_url
         input_name = str(body.get("input_name") or "query").strip()
         input_value = str(body.get("input_value") or "")
         if input_value and (not input_name or len(input_name) > 80 or len(input_value) > 4_000):
@@ -61,7 +61,7 @@ class InspectorController:
         allowed_domains = frozenset(
             _bounded_text(value, "allowed domain", 255) for value in raw_domains
         )
-        config = RunConfig(
+        return RunConfig(
             goal=goal,
             start_url=start_url,
             model=self.model,
@@ -81,6 +81,9 @@ class InspectorController:
             allow_risky=body.get("allow_risky") is True,
             allow_external_navigation=body.get("url") in (None, ""),
         )
+
+    def reset(self, body: dict) -> dict:
+        config = self._config(body)
         if self.engine is None:
             self.engine = OpenUltraDecisionEngine(self.model)
         next_agent = InteractiveAgent(config, decision_engine=self.engine)
@@ -88,6 +91,15 @@ class InspectorController:
         self.agent = next_agent
         self.run_id = secrets.token_urlsafe(12)
         return self.agent.state()
+
+    def retask(self, body: dict) -> dict:
+        if self.agent is None:
+            raise ValueError("Start a task first")
+        current_url = self.agent.state()["page"]["url"]
+        config = self._config(body, current_url=current_url)
+        state = self.agent.retask(config)
+        self.run_id = secrets.token_urlsafe(12)
+        return state
 
     def frame(self) -> dict:
         if self.agent is None:
@@ -102,6 +114,8 @@ class InspectorController:
             raise ValueError("Start a task first")
         if body.get("run_id") != self.run_id:
             raise ValueError("This task was replaced by a newer run")
+        if name == "retask":
+            return {**self.retask(body), "run_id": self.run_id}
         if name == "predict":
             return {**self.agent.predict(), "run_id": self.run_id}
         if name == "act":

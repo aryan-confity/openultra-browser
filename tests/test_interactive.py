@@ -187,3 +187,31 @@ def test_live_frame_capture_does_not_change_observation_or_decision_state():
     assert after["page"]["fingerprint"] == fingerprint
     assert after["decision"] == predicted["decision"]
     agent.close()
+
+
+def test_retask_preserves_browser_and_current_page_while_resetting_run_state():
+    agent = InteractiveAgent(
+        config(success_text="requested result"),
+        decision_engine=FillEngine(),
+        browser_factory=FakeBrowser,
+    )
+    predicted = agent.predict()
+    completed = agent.act(predicted["page"]["fingerprint"])
+    browser = agent.browser
+
+    state = agent.retask(
+        config(
+            goal="Review the current result",
+            start_url=completed["page"]["url"],
+            prepared_inputs={},
+            success_text=None,
+        )
+    )
+
+    assert agent.browser is browser
+    assert browser.closed is False
+    assert state["goal"] == "Review the current result"
+    assert state["page"]["url"] == "https://example.com/result"
+    assert state["history"] == []
+    assert state["elapsed_ms"] < 100
+    agent.close()

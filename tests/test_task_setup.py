@@ -68,3 +68,10 @@ def test_explicit_destination_wins_over_generic_search_startup():
 
     assert setup.start_url == "https://youtube.com"
     assert setup.prepared_inputs == {"search query": "Neon AI stream"}
+
+
+def test_continuation_does_not_turn_a_page_action_into_a_search_query():
+    setup = plan_task("Click the More information link", continuation=True)
+
+    assert setup.start_url == GOOGLE_START_URL
+    assert setup.prepared_inputs == {}

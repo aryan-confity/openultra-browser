@@ -59,7 +59,11 @@ async function call(name, body = {}) {
 
 function setControls() {
   const active = state?.page && !terminal.has(state.status);
+  const hasPage = Boolean(state?.page);
   byId("start").disabled = busy;
+  byId("start").className = hasPage ? "secondary" : "primary";
+  byId("continue-task").hidden = !hasPage;
+  byId("continue-task").disabled = busy || !hasPage;
   byId("goal").disabled = busy;
   byId("run").disabled = busy || !active || automatic;
   byId("run").hidden = automatic;
@@ -142,7 +146,7 @@ async function runAutomatically() {
   }
 }
 
-async function startTask() {
+async function startTask(command = "reset") {
   if (busy) return;
   busy = true;
   automatic = false;
@@ -150,7 +154,7 @@ async function startTask() {
   byId("status").textContent = "Opening browser";
   setControls();
   try {
-    await call("reset", {
+    await call(command, {
       goal: byId("goal").value,
       max_steps: 24,
       max_seconds: 180,
@@ -177,8 +181,10 @@ async function startTask() {
 
 byId("task-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  startTask();
+  startTask("reset");
 });
+
+byId("continue-task").addEventListener("click", () => startTask("retask"));
 
 byId("run").addEventListener("click", () => {
   if (!busy && state?.page && !terminal.has(state.status)) {
@@ -198,6 +204,7 @@ byId("stop").addEventListener("click", () => {
 
 fetch("/api/state").then((response) => response.json()).then((value) => {
   state = value;
+  if (value.goal) byId("goal").value = value.goal;
   syncTimer();
   render();
 }).catch(() => { byId("status").textContent = "Local service unavailable"; });

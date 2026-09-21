@@ -38,7 +38,9 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert 'fetch("/api/frame"' in script
     assert "setInterval(refreshFrame, 400)" in script
     assert "requestAnimationFrame(() => requestAnimationFrame(resolve))" in script
-    assert 'await call("reset"' in script
+    assert 'id="continue-task"' in html
+    assert 'await call(command' in script
+    assert 'startTask("retask")' in script
     assert "await runAutomatically()" in script
     assert "payload.run_id = state.run_id" in script
 
@@ -81,6 +83,9 @@ def test_stale_run_cannot_issue_commands(monkeypatch):
         def close(self):
             self.closed = True
 
+        def retask(self, _config):
+            return {"status": "ready", "page": {"url": "https://example.org/current"}}
+
     monkeypatch.setattr("openultra_browser.inspector.InteractiveAgent", FakeInteractiveAgent)
     monkeypatch.setattr(
         "openultra_browser.inspector.OpenUltraDecisionEngine", lambda _model: object()
@@ -99,3 +104,39 @@ def test_stale_run_cannot_issue_commands(monkeypatch):
         assert "replaced" in str(error)
     else:
         raise AssertionError("a stale inspector run controlled the current task")
+
+
+def test_retask_rotates_run_identity_without_replacing_the_agent(monkeypatch):
+    class FakeInteractiveAgent:
+        def __init__(self, config, *, decision_engine):
+            self.config = config
+            self.closed = False
+
+        def state(self):
+            return {"status": "ready", "page": {"url": "https://example.com/current"}}
+
+        def retask(self, config):
+            self.config = config
+            return self.state()
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("openultra_browser.inspector.InteractiveAgent", FakeInteractiveAgent)
+    monkeypatch.setattr(
+        "openultra_browser.inspector.OpenUltraDecisionEngine", lambda _model: object()
+    )
+    controller = InspectorController("model")
+    controller.reset({"goal": "Open https://example.com"})
+    agent = controller.agent
+    first_run_id = controller.run_id
+
+    state = controller.command(
+        "retask",
+        {"run_id": first_run_id, "goal": "Review the current page"},
+    )
+
+    assert controller.agent is agent
+    assert controller.run_id != first_run_id
+    assert state["run_id"] == controller.run_id
+    assert agent.config.start_url == "https://example.com/current"

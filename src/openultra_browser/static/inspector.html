@@ -21,9 +21,10 @@
         <form id="task-form">
           <label for="goal">Task</label>
           <textarea id="goal" rows="6" required autofocus placeholder="Describe what you want the browser to do"></textarea>
-          <button class="primary" id="start" type="submit">
-            <span>Start task</span>
-          </button>
+          <div class="task-actions">
+            <button class="primary" id="continue-task" type="button" hidden>Continue from current page</button>
+            <button class="primary" id="start" type="submit">Start new task</button>
+          </div>
         </form>
 
         <div id="error" role="alert" hidden></div>
@@ -50,7 +51,7 @@
         </section>
 
         <div class="run-controls">
-          <button id="run" type="button" disabled>Resume</button>
+          <button id="run" type="button" disabled>Resume current run</button>
           <button id="stop" type="button" hidden>Pause</button>
         </div>
 

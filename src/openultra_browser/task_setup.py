@@ -107,7 +107,7 @@ def _form_inputs(goal: str) -> dict[str, str]:
     return values
 
 
-def plan_task(goal: str) -> TaskSetup:
+def plan_task(goal: str, *, continuation: bool = False) -> TaskSetup:
     """Choose a starting page and literal task-supplied text without model generation."""
     goal = goal.strip()
     if not goal:
@@ -123,5 +123,7 @@ def plan_task(goal: str) -> TaskSetup:
         if parsed.scheme in {"http", "https"} and parsed.hostname:
             return TaskSetup(destination, form_inputs)
     if search_text:
+        return TaskSetup(GOOGLE_START_URL, form_inputs)
+    if continuation:
         return TaskSetup(GOOGLE_START_URL, form_inputs)
     return TaskSetup(GOOGLE_START_URL, {"search query": goal})
