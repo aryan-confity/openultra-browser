@@ -15,10 +15,62 @@ SEMIF_REVISION = "32f3e8ecf65426fc3306969496342d504bfa13f3"
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MAX_TOKENS = 2_048
 BATCH_SIZE = 4
+VISIBLE_MARKER = "Visible page text:\n"
 SYSTEM_PROMPT = (
     "Apply the criterion to the supplied evidence. Choose exactly one listed option. "
     "Respond with only its uppercase letter, with no explanation or reasoning."
 )
+
+
+def _excerpt(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit == 0:
+        return "[Visible text omitted to fit the local model context.]"
+    head = limit // 2
+    return f"{text[:head]}\n[Middle of visible text omitted.]\n{text[-(limit - head):]}"
+
+
+def _state_candidates(state: str):
+    yield state
+    prefix, separator, visible = state.partition(VISIBLE_MARKER)
+    if not separator:
+        return
+    for limit in (1_200, 800, 400, 200, 0):
+        yield prefix + separator + _excerpt(visible, limit)
+    lines = prefix.splitlines()
+    essential = [
+        line
+        for line in lines
+        if line.startswith(
+            ("Overall task:", "Current required step:", "Current page:", "Trust boundary:")
+        )
+    ]
+    recent = next((line for line in lines if line.startswith("Recent actions:")), "")
+    if recent:
+        essential.append("Recent actions (latest excerpt): " + recent[-500:])
+    compact = "\n".join(essential) + "\n" + separator
+    for limit in (600, 300, 0):
+        yield compact + _excerpt(visible, limit)
+
+
+def _question_choices(question: dict) -> tuple[list[str], list[str]]:
+    kind = question.get("type")
+    criteria = question.get("criteria") or {}
+    if kind == "choice" and isinstance(criteria, dict) and criteria:
+        choices = list(criteria)
+        descriptions = [str(criteria[key] or key) for key in choices]
+    elif kind == "noul" and isinstance(criteria, dict):
+        choices = ["true", "false"]
+        descriptions = [
+            str(criteria.get("true") or "The condition is true."),
+            str(criteria.get("false") or "The condition is false."),
+        ]
+    else:
+        raise ValueError(f"SemIf cannot score question type {kind!r}")
+    if not 2 <= len(choices) <= len(LETTERS):
+        raise ValueError("SemIf requires 2-26 modeled options per question")
+    return choices, descriptions
 
 
 class SemIfMLXPredictor:
@@ -62,21 +114,7 @@ class SemIfMLXPredictor:
             raise ValueError("SemIf tokenizer has no padding or EOS token")
 
     def _encode(self, state: str, question: dict) -> tuple[list[int], list[str]]:
-        kind = question.get("type")
-        criteria = question.get("criteria") or {}
-        if kind == "choice" and isinstance(criteria, dict) and criteria:
-            choices = list(criteria)
-            descriptions = [str(criteria[key] or key) for key in choices]
-        elif kind == "noul":
-            choices = ["true", "false"]
-            descriptions = [
-                str(criteria.get("true") or "The condition is true."),
-                str(criteria.get("false") or "The condition is false."),
-            ]
-        else:
-            raise ValueError(f"SemIf cannot score question type {kind!r}")
-        if not 2 <= len(choices) <= len(LETTERS):
-            raise ValueError("SemIf requires 2-26 modeled options per question")
+        choices, descriptions = _question_choices(question)
         payload = {
             "evidence": state,
             "criterion": str(question.get("instructions") or ""),
@@ -85,18 +123,22 @@ class SemIfMLXPredictor:
                 for index, description in enumerate(descriptions)
             ],
         }
-        prompt = self.tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-        if not ids or len(ids) > MAX_TOKENS:
-            raise ValueError("SemIf prompt exceeds its 2048-token browser limit")
+        for candidate_state in _state_candidates(state):
+            payload["evidence"] = candidate_state
+            prompt = self.tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+            if ids and len(ids) <= MAX_TOKENS:
+                break
+        else:
+            raise ValueError("SemIf task and action choices exceed its 2048-token browser limit")
         for index in range(len(choices)):
             if self.tokenizer.encode(prompt + LETTERS[index], add_special_tokens=False) != (
                 ids + [self.slots[index]]
