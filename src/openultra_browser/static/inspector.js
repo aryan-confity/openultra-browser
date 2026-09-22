@@ -75,6 +75,7 @@ function setControls() {
   byId("continue-task").hidden = !hasPage;
   byId("continue-task").disabled = busy || voiceListening || !hasPage;
   byId("goal").disabled = busy;
+  byId("model-select").disabled = busy || voiceListening;
   byId("text-mode").disabled = busy || voiceListening;
   byId("voice-mode").disabled = busy || voiceListening;
   byId("run-transcript").disabled = busy || voiceListening || !byId("goal").value.trim();
@@ -353,6 +354,8 @@ function requestTask(command) {
 
 function render() {
   if (!state) return;
+  byId("model-select").value = state.model_id || "laya";
+  byId("semif-option").disabled = !state.semif_available;
   const labels = {
     idle: "Ready for a task",
     ready: "Ready for the next step",
@@ -494,6 +497,26 @@ byId("run-transcript").addEventListener("click", () => {
   void startTask(voiceFallbackCommand, transcript);
 });
 byId("goal").addEventListener("input", () => updateTranscriptFallback());
+
+byId("model-select").addEventListener("change", async (event) => {
+  if (busy || voiceListening) return;
+  const selected = event.target.value;
+  automatic = false;
+  busy = true;
+  byId("error").hidden = true;
+  byId("status").textContent = `Loading ${{ von: "Von 1.0", semif: "SemIf" }[selected] || "Laya"}`;
+  setControls();
+  try {
+    await call("switch-model", { model_id: selected });
+  } catch (error) {
+    byId("error").textContent = error.message;
+    byId("error").hidden = false;
+    byId("model-select").value = state?.model_id || "laya";
+  } finally {
+    busy = false;
+    render();
+  }
+});
 
 byId("run").addEventListener("click", () => {
   if (!busy && state?.page && !terminal.has(state.status)) {

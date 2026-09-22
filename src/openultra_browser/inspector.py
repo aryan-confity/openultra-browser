@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import atexit
+import importlib.util
 import json
 import secrets
 import threading
 import webbrowser
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,8 +16,10 @@ from urllib.parse import urlparse
 from .config import RunConfig, default_model_path
 from .decision import OpenUltraDecisionEngine
 from .interactive import InteractiveAgent
+from .semif_mlx import SEMIF_MODEL
 from .task_setup import plan_task
 from .voice import prepare_voice_candidate, should_commit_voice_candidate
+from .von_mlx import VON_MODEL
 
 STATIC_ROOT = Path(__file__).with_name("static")
 START_TASK_FIRST = "Start a task first"
@@ -23,6 +27,7 @@ START_TASK_FIRST = "Start a task first"
 
 class InspectorController:
     def __init__(self, model: str) -> None:
+        self.laya_model = model if model not in {VON_MODEL, SEMIF_MODEL} else default_model_path()
         self.model = model
         self.engine = None
         self.agent: InteractiveAgent | None = None
@@ -30,7 +35,7 @@ class InspectorController:
 
     def state(self) -> dict:
         if self.agent:
-            return {**self.agent.state(), "run_id": self.run_id}
+            return self._with_model_state(self.agent.state())
         return {
             "status": "idle",
             "reason": "Ready for a task",
@@ -47,7 +52,38 @@ class InspectorController:
             "model": self.model,
             "network_model_calls": 0,
             "run_id": None,
+            "model_id": self._model_id(),
+            "semif_available": importlib.util.find_spec("mlx_lm") is not None,
         }
+
+    def _model_id(self) -> str:
+        return {VON_MODEL: "von", SEMIF_MODEL: "semif"}.get(self.model, "laya")
+
+    def _with_model_state(self, state: dict) -> dict:
+        return {
+            **state,
+            "run_id": self.run_id,
+            "model_id": self._model_id(),
+            "semif_available": importlib.util.find_spec("mlx_lm") is not None,
+        }
+
+    def switch_model(self, body: dict) -> dict:
+        model_id = body.get("model_id")
+        if model_id not in {"laya", "von", "semif"}:
+            raise ValueError("Choose Laya, Von 1.0, or SemIf")
+        selected = {"laya": self.laya_model, "von": VON_MODEL, "semif": SEMIF_MODEL}[model_id]
+        if selected == self.model:
+            return self.state()
+        # Finish model loading before changing the active browser run.
+        replacement = OpenUltraDecisionEngine(selected)
+        if self.agent:
+            updated = replace(self.agent.config, model=selected)
+            self.agent.retask(updated)
+            self.agent.engine = replacement
+            self.run_id = secrets.token_urlsafe(12)
+        self.engine = replacement
+        self.model = selected
+        return self.state()
 
     def _config(self, body: dict, *, current_url: str | None = None) -> RunConfig:
         goal = _bounded_text(body.get("goal"), "goal", 4_000)
@@ -142,9 +178,13 @@ class InspectorController:
         }
 
     def command(self, name: str, body: dict) -> dict:
+        if name == "switch-model":
+            if self.agent and body.get("run_id") != self.run_id:
+                raise ValueError("This task was replaced by a newer run")
+            return self.switch_model(body)
         if name == "reset":
             state = self.reset(body)
-            return {**state, "run_id": self.run_id}
+            return self._with_model_state(state)
         if name == "voice-plan":
             return self.voice_plan(body)
         if self.agent is None:
@@ -152,16 +192,15 @@ class InspectorController:
         if body.get("run_id") != self.run_id:
             raise ValueError("This task was replaced by a newer run")
         if name == "retask":
-            return {**self.retask(body), "run_id": self.run_id}
+            return self._with_model_state(self.retask(body))
         if name == "predict":
-            return {**self.agent.predict(), "run_id": self.run_id}
+            return self._with_model_state(self.agent.predict())
         if name == "act":
-            return {
-                **self.agent.act(_bounded_text(body.get("fingerprint"), "fingerprint", 128)),
-                "run_id": self.run_id,
-            }
+            return self._with_model_state(
+                self.agent.act(_bounded_text(body.get("fingerprint"), "fingerprint", 128))
+            )
         if name == "tick":
-            return {**self.agent.tick(), "run_id": self.run_id}
+            return self._with_model_state(self.agent.tick())
         raise ValueError("Unknown inspector command")
 
     def close(self) -> None:

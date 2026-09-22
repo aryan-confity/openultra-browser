@@ -45,6 +45,10 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert "await runAutomatically()" in script
     assert "payload.run_id = state.run_id" in script
     assert 'id="voice-mode"' in html
+    assert 'id="model-select"' in html
+    assert '<option value="von">Von 1.0 · MLX</option>' in html
+    assert '<option id="semif-option" value="semif">SemIf · MLX 4-bit</option>' in html
+    assert 'call("switch-model", { model_id: selected })' in script
     assert 'id="cancel-voice"' in html
     assert 'id="run-transcript"' in html
     assert "globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition" in script
@@ -189,6 +193,87 @@ def test_retask_recovers_the_browser_owned_http_page_before_config_validation(mo
     controller.retask({"goal": "Go back"})
 
     assert controller.agent.config.start_url == "https://google.com/travel/flights"
+
+
+def test_model_switch_preserves_browser_and_rotates_run(monkeypatch):
+    class FakeInteractiveAgent:
+        def __init__(self, config, *, decision_engine):
+            self.config = config
+            self.engine = decision_engine
+            self.closed = False
+
+        def state(self):
+            return {"status": "ready", "page": {"url": "https://example.com/current"}}
+
+        def retask(self, config):
+            self.config = config
+            return self.state()
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("openultra_browser.inspector.InteractiveAgent", FakeInteractiveAgent)
+    monkeypatch.setattr(
+        "openultra_browser.inspector.OpenUltraDecisionEngine", lambda model: {"model": model}
+    )
+    controller = InspectorController("laya-path")
+    controller.reset({"goal": "Open https://example.com"})
+    agent = controller.agent
+    old_run_id = controller.run_id
+
+    switched = controller.command("switch-model", {"run_id": old_run_id, "model_id": "von"})
+
+    assert controller.agent is agent
+    assert not agent.closed
+    assert agent.engine["model"] == agent.config.model == controller.model
+    assert switched["model_id"] == "von"
+    assert controller.run_id != old_run_id
+    try:
+        controller.command("predict", {"run_id": old_run_id})
+    except ValueError as error:
+        assert "replaced" in str(error)
+    else:
+        raise AssertionError("stale command survived a model switch")
+
+    restored = controller.command(
+        "switch-model", {"run_id": controller.run_id, "model_id": "laya"}
+    )
+    assert restored["model_id"] == "laya"
+    assert agent.config.model == "laya-path"
+
+
+def test_model_switch_accepts_optional_semif(monkeypatch):
+    monkeypatch.setattr(
+        "openultra_browser.inspector.OpenUltraDecisionEngine", lambda model: {"model": model}
+    )
+    controller = InspectorController("laya-path")
+
+    switched = controller.command("switch-model", {"model_id": "semif"})
+
+    assert switched["model_id"] == "semif"
+    assert controller.engine["model"] == inspector_module.SEMIF_MODEL
+
+
+def test_failed_model_switch_keeps_old_engine_and_run(monkeypatch):
+    def fake_engine(model):
+        if model == inspector_module.VON_MODEL:
+            raise RuntimeError("checkpoint unavailable")
+        return object()
+
+    monkeypatch.setattr("openultra_browser.inspector.OpenUltraDecisionEngine", fake_engine)
+    controller = InspectorController("laya-path")
+    controller.engine = fake_engine("laya-path")
+    previous = controller.engine
+
+    try:
+        controller.command("switch-model", {"model_id": "von"})
+    except RuntimeError as error:
+        assert "checkpoint unavailable" in str(error)
+    else:
+        raise AssertionError("failed model load was reported as switched")
+    assert controller.engine is previous
+    assert controller.model == "laya-path"
+    assert controller.state()["model_id"] == "laya"
 
 
 def test_voice_plan_requires_model_and_deterministic_agreement():

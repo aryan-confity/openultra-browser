@@ -251,3 +251,37 @@ test('failed task request preserves error and releases busy state', async () => 
   assert.equal(ui.getElement('error').textContent, 'Task rejected');
   assert.equal(ui.evaluate('busy'), false);
 });
+
+test('model selector switches the engine and rotates the browser run', async () => {
+  const ui = harness([makeState('ready', { model_id: 'von', run_id: 'run-2' })]);
+  await ui.ready;
+  ui.context.sample = makeState('ready', { model_id: 'laya', semif_available: true });
+  ui.evaluate('state = sample; render()');
+  assert.equal(ui.getElement('semif-option').disabled, false);
+  ui.getElement('model-select').value = 'von';
+  ui.getElement('model-select').dispatch('change', { target: ui.getElement('model-select') });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(ui.requests[1].url, '/api/switch-model');
+  assert.deepEqual(JSON.parse(ui.requests[1].options.body), {
+    model_id: 'von', run_id: 'run-1',
+  });
+  assert.equal(ui.getElement('model-select').value, 'von');
+  assert.equal(ui.evaluate('state.run_id'), 'run-2');
+  assert.equal(ui.evaluate('busy'), false);
+});
+
+test('failed model switch restores the previous selection', async () => {
+  const ui = harness([{ ok: false, error: 'Checkpoint unavailable' }]);
+  await ui.ready;
+  ui.context.sample = makeState('ready', { model_id: 'laya', semif_available: false });
+  ui.evaluate('state = sample; render()');
+  assert.equal(ui.getElement('semif-option').disabled, true);
+  ui.getElement('model-select').value = 'von';
+  ui.getElement('model-select').dispatch('change', { target: ui.getElement('model-select') });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(ui.getElement('model-select').value, 'laya');
+  assert.equal(ui.getElement('error').textContent, 'Checkpoint unavailable');
+  assert.equal(ui.evaluate('busy'), false);
+});

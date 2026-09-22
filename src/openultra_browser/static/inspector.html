@@ -18,6 +18,15 @@
           <span class="local"><span class="status-dot"></span>Local</span>
         </header>
 
+        <div class="model-control">
+          <label for="model-select">Decision model</label>
+          <select id="model-select" aria-label="Decision model">
+            <option value="laya">Laya · MLX</option>
+            <option value="von">Von 1.0 · MLX</option>
+            <option id="semif-option" value="semif">SemIf · MLX 4-bit</option>
+          </select>
+        </div>
+
         <form id="task-form">
           <div class="task-heading">
             <label for="goal">Task</label>

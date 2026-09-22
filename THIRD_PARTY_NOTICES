@@ -35,3 +35,15 @@ Licensed under the MIT License.
 OpenUltra's bounded prior-page/action context and correction-aware target policy are independent
 Python adaptations of patterns demonstrated by the Jev Voice Browser reference implementation.
 The same MIT permission and warranty terms reproduced above apply.
+
+SemIf
+Copyright (c) 2026 TheoLeeCJ
+Licensed under the MIT License. OpenUltra's optional MLX direct-option adapter adapts
+SemIf's criterion/evidence prompt and answer-slot readout. The MIT permission and
+warranty terms reproduced above apply.
+
+Von and Qwen model weights
+Von code and model weights are provided by wfzyx under Apache-2.0. The optional
+SemIf adapter uses the MLX-community conversion of Qwen3.5-4B, whose original
+weights retain their upstream Apache-2.0 terms. Model weights are downloaded
+separately and are not included in this source distribution.

@@ -28,6 +28,7 @@ dependencies = [
 Repository = "https://github.com/aryan-confity/openultra-browser"
 
 [project.optional-dependencies]
+semif = ["mlx-lm==0.31.3; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 dev = ["build>=1.2", "pytest>=8", "pytest-cov>=6,<8", "ruff>=0.12"]
 
 [project.scripts]

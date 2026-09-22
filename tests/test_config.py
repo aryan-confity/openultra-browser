@@ -66,3 +66,19 @@ def test_rejects_relative_success_url_prefix():
             start_url="https://example.com",
             success_url_prefix="/docs",
         )
+
+
+def test_semif_candidate_limit_is_checked_before_browser_start():
+    with pytest.raises(ValueError, match="at most 26 candidates"):
+        RunConfig(
+            goal="Open a result",
+            start_url="https://example.com",
+            model="semif-mlx",
+            max_candidates=27,
+        )
+    assert RunConfig(
+        goal="Open a result",
+        start_url="https://example.com",
+        model="semif-mlx",
+        max_candidates=26,
+    ).max_candidates == 26

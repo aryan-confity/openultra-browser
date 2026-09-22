@@ -51,6 +51,8 @@ class RunConfig:
             raise ValueError("max_seconds must be positive")
         if not 6 <= self.max_candidates <= 40:
             raise ValueError("max_candidates must be between 6 and 40")
+        if self.model == "semif-mlx" and self.max_candidates > 26:
+            raise ValueError("SemIf supports at most 26 candidates")
         if self.success_url_prefix:
             success_url = urlparse(self.success_url_prefix)
             if success_url.scheme not in {"http", "https"} or not success_url.hostname:

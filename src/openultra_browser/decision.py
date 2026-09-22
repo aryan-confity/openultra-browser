@@ -129,17 +129,29 @@ class OpenUltraDecisionEngine:
     def __init__(self, model: str, *, optimize: bool = False, agent=None) -> None:
         self.model_path = model
         if agent is None:
-            from laya_mlx import Agent
+            from .semif_mlx import SEMIF_MODEL
+            from .von_mlx import VON_MODEL
 
-            agent = Agent(
-                model,
-                dtype="float16",
-                device="gpu",
-                batch_size=8,
-                compile=optimize,
-                pad_to_multiple=16 if optimize else None,
-                cache_prompts=optimize,
-            )
+            if model == VON_MODEL:
+                from .von_mlx import VonMLXPredictor
+
+                agent = VonMLXPredictor()
+            elif model == SEMIF_MODEL:
+                from .semif_mlx import SemIfMLXPredictor
+
+                agent = SemIfMLXPredictor()
+            else:
+                from laya_mlx import Agent
+
+                agent = Agent(
+                    model,
+                    dtype="float16",
+                    device="gpu",
+                    batch_size=8,
+                    compile=optimize,
+                    pad_to_multiple=16 if optimize else None,
+                    cache_prompts=optimize,
+                )
         self.agent = agent
 
     def classify_voice_command(self, transcript: str, candidate: str) -> dict[str, float | str]:
