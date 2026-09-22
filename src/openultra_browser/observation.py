@@ -285,6 +285,38 @@ def _goal_terms(value: str) -> set[str]:
     return _tokens(value) - GOAL_STOPWORDS
 
 
+def _reverses_requested_route(element: ObservedElement, goal: str) -> bool:
+    """A search result for the opposite direction is not a route match."""
+    requested = re.search(
+        r"\b(?:from|between)\s+([\w .-]+?)\s+(?:to|and)\s+([\w .-]+?)"
+        r"(?=\s+(?:on|for|departing|returning|in)\b|[,.;!?]|$)",
+        goal,
+        re.IGNORECASE,
+    )
+    if not requested:
+        return False
+    origin, destination = (re.escape(value.strip()) for value in requested.groups())
+    if not origin or not destination or origin.casefold() == destination.casefold():
+        return False
+    label = element.name
+    return bool(
+        re.search(rf"\b{destination}\s*(?:to|[-–→])\s*{origin}\b", label, re.IGNORECASE)
+    )
+
+
+def _search_vertical_match(element: ObservedElement, goal: str, current_url: str) -> bool:
+    """Prefer a first-party vertical over a generic search ad for that category."""
+    current = urlparse(current_url)
+    target = urlparse(element.href)
+    return bool(
+        element.role == "link"
+        and current.hostname in {"google.com", "www.google.com"}
+        and target.hostname in {"google.com", "www.google.com"}
+        and bool({"flight", "flights"} & _goal_terms(goal))
+        and target.path.startswith("/travel/flights")
+    )
+
+
 def _score(element: ObservedElement, goal: str) -> float:
     overlap = len(_matched_goal_terms(element, goal))
     role_bonus = 2 if element.role in {"button", "link", "searchbox", "textbox"} else 0
@@ -292,6 +324,8 @@ def _score(element: ObservedElement, goal: str) -> float:
 
 
 def _matched_goal_terms(element: ObservedElement, goal: str) -> set[str]:
+    if _reverses_requested_route(element, goal):
+        return set()
     goal_terms = _goal_terms(goal)
     element_terms = _tokens(element.goal_description)
     requested_stateful = goal_terms & STATEFUL_CONTROL_VERBS
@@ -554,6 +588,7 @@ class _ElementFacts:
     goal_match: bool
     verifier_match: bool
     preferred_match: bool
+    vertical_match: bool
     suffix: str
 
 
@@ -591,10 +626,14 @@ class _ActionBuilder:
             and urlparse(target_url).hostname in self.preferred_domains
         )
         verifier_match = prefix_match or regex_match
+        vertical_match = _search_vertical_match(
+            element, self.matching_goal, self.snapshot.url
+        )
         score = (
             _score(element, self.matching_goal)
             + (40 if verifier_match else 0)
             + (30 if preferred_match else 0)
+            + (35 if vertical_match else 0)
         )
         content_detail_match = _content_detail_match(
             element, self.matching_goal, self.snapshot.url
@@ -610,6 +649,8 @@ class _ActionBuilder:
                 if content_detail_match else ""
             )
             + _goal_match(element, self.matching_goal)
+            + (" First-party search category for the requested flight task: YES."
+               if vertical_match else "")
         )
         return _ElementFacts(
             score=score,
@@ -618,11 +659,14 @@ class _ActionBuilder:
             or content_detail_match or verifier_match,
             verifier_match=verifier_match,
             preferred_match=preferred_match,
+            vertical_match=vertical_match,
             suffix=suffix,
         )
 
     def rank_elements(self) -> None:
         for element in self.snapshot.elements:
+            if _reverses_requested_route(element, self.matching_goal):
+                continue
             element_stateful = _tokens(element.goal_description) & STATEFUL_CONTROL_VERBS
             if element_stateful and not element_stateful & _goal_terms(self.matching_goal):
                 continue
@@ -722,10 +766,10 @@ class _ActionBuilder:
             f"Activate {element.description}." + facts.suffix,
             element.element_id,
             target_url=facts.target_url,
-            goal_match=facts.goal_match or facts.preferred_match,
+            goal_match=facts.goal_match or facts.preferred_match or facts.vertical_match,
         )
         self.ranked.append((facts.score, action))
-        if facts.verifier_match or facts.preferred_match:
+        if facts.verifier_match or facts.preferred_match or facts.vertical_match:
             self.strong_action_ids.add(action.action_id)
 
     def promote_complete_matches(self) -> None:

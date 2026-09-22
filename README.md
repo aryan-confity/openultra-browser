@@ -51,6 +51,8 @@ SemIf is disabled in the selector until its optional runtime is installed:
 
 Budget several additional gigabytes of free disk for model caches and use a Mac with enough memory for a 4B model; the optional path was exercised on a 24 GB Apple Silicon Mac. Checkpoint downloads need network access once, but inference then runs locally. Switching does not change the site's network requests or the browser's speech-recognition service. For CLI runs, pass `--model von-1.0-mlx` or `--model semif-mlx`; the default remains Laya.
 
+When the optional MLX-LM extra is installed, **all three decision-model choices** can use the same pinned local Qwen3.5 checkpoint once per task to extract explicitly stated field values such as route, date, name, and phone. This follows the useful separation in [Laya Ultrafast](https://github.com/ipenywis/laya-ultrafast): text planning prepares values, while the typed model chooses among observed browser actions. OpenUltra keeps the text pass local instead of calling a hosted text model. Generated values are accepted only when present literally in your task; the planner cannot authorize a destination, a click, or completion. The checkpoint is shared with SemIf when SemIf is selected. Set `OPENULTRA_LOCAL_PLANNER=0` before starting to disable this optional pass and its additional memory use. Installing the extra does not make every site or task supported.
+
 ### Troubleshooting
 
 - **Inspector port occupied:** run `./scripts/start.sh --port 9876`. This changes the UI port, not the Chrome DevTools port.
@@ -70,6 +72,7 @@ OpenUltra uses typed decisions rather than asking a language model to generate s
 
 ```text
 task + visible page
+      -> optional one-time local extraction of literal field values
       -> one bounded DOM observation and indexed action space
       -> local typed-model batch(es): operation, compatible targets, completion, stuck
       -> deterministic safety and freshness checks

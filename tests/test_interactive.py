@@ -376,3 +376,22 @@ def test_skip_ad_click_without_result_is_not_completion():
     assert result["status"] != "completed"
     assert not result["history"][0]["changed"]
     agent.close()
+
+
+def test_local_plan_is_shared_with_explicit_values_taking_precedence():
+    class PlannedEngine:
+        def plan_literal_inputs(self, goal):
+            assert "Bangkok" in goal
+            return {"where from": "Bangkok", "query": "invented query"}
+
+    agent = InteractiveAgent(
+        config(goal="Find flights from Bangkok to Munich"),
+        decision_engine=PlannedEngine(),
+        browser_factory=FakeBrowser,
+    )
+
+    assert agent.config.prepared_inputs == {
+        "where from": "Bangkok",
+        "query": "private search phrase",
+    }
+    agent.close()

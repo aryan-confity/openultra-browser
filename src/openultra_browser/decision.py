@@ -154,6 +154,12 @@ class OpenUltraDecisionEngine:
                 )
         self.agent = agent
 
+    def plan_literal_inputs(self, goal: str) -> dict[str, str]:
+        """Share the optional local text planner across all typed-decision engines."""
+        from .local_planner import plan_literal_inputs, planner_available
+
+        return plan_literal_inputs(goal) if planner_available() else {}
+
     def classify_voice_command(self, transcript: str, candidate: str) -> dict[str, float | str]:
         """Classify one partial utterance without exposing it to browser execution."""
         state = (

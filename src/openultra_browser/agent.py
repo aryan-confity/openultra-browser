@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .browser import Browser, ExecutionUncertain, StalePage
 from .config import RunConfig
@@ -27,6 +27,7 @@ from .task_progress import (
     click_outcome_evidence,
     error_blocks_progress,
     login_blocks_progress,
+    planned_search_evidence,
     step_completion_disposition,
     summarize_page_change,
     verified_scroll_step,
@@ -61,6 +62,18 @@ class BrowserAgent:
         self.engine = decision_engine or OpenUltraDecisionEngine(
             config.model, optimize=config.optimize
         )
+        self.planning_warning: str | None = None
+        planner = getattr(self.engine, "plan_literal_inputs", None)
+        if callable(planner):
+            try:
+                planned = planner(config.goal)
+                if planned:
+                    self.config = replace(
+                        config,
+                        prepared_inputs={**planned, **config.prepared_inputs},
+                    )
+            except (OSError, RuntimeError, ValueError) as error:
+                self.planning_warning = f"Local field planning unavailable: {error}"
         self.browser_factory = browser_factory
         self.policy = SafetyPolicy(
             config.effective_allowed_domains,
@@ -102,6 +115,7 @@ class BrowserAgent:
                 "model": self.config.model,
                 "allowed_domains": sorted(self.config.effective_allowed_domains),
                 "network_model_calls": 0,
+                "planning_warning": self.planning_warning,
                 "task_steps": list(state.progress.steps),
                 "completed_steps": list(state.progress.completed_steps),
             },
@@ -130,6 +144,10 @@ class BrowserAgent:
         decision: ModelDecision,
         snapshot: BrowserSnapshot,
     ) -> bool:
+        if not planned_search_evidence(
+            self.config.goal, self.config.prepared_inputs, snapshot
+        ):
+            return False
         disposition = step_completion_disposition(state.progress, decision, state.history)
         if disposition == "verified":
             return True

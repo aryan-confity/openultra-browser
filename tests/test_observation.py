@@ -31,6 +31,33 @@ def test_goal_relevant_control_is_prioritized():
     assert result[0].element_id == "e1"
 
 
+def test_flight_search_rejects_reversed_sponsored_route_and_opens_vertical():
+    result = build_actions(
+        BrowserSnapshot(
+            "https://www.google.com/search?q=flights+between+bangkok+to+munich+on+jan+28",
+            "Google Search",
+            "Flights search results",
+            (
+                ObservedElement(
+                    "ad", "link", "Book a flight Munich - Bangkok", "a",
+                    href="https://www.austrian.com/book/munich-bangkok",
+                ),
+                ObservedElement(
+                    "flights", "link", "Flights", "a",
+                    href="https://www.google.com/travel/flights?hl=en",
+                ),
+            ),
+        ),
+        "find flights between bangkok to munich on jan 28",
+        {},
+        10,
+        False,
+    )
+
+    assert result[0].element_id == "flights"
+    assert all(action.element_id != "ad" for action in result)
+
+
 def test_prepared_value_is_named_but_not_exposed():
     result = build_actions(
         snapshot(ObservedElement("e0", "searchbox", "Search", "input", input_type="search")),

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
-from typing import Any
+from dataclasses import asdict, replace
+from typing import Any, cast
 
 from .browser import Browser, ExecutionUncertain, StalePage
 from .config import RunConfig
@@ -26,6 +26,7 @@ from .task_progress import (
     click_outcome_evidence,
     error_blocks_progress,
     login_blocks_progress,
+    planned_search_evidence,
     step_completion_disposition,
     summarize_page_change,
     verified_scroll_step,
@@ -59,6 +60,9 @@ class InteractiveAgent:
         self.engine = decision_engine or OpenUltraDecisionEngine(
             config.model, optimize=config.optimize
         )
+        self.planning_warning: str | None = None
+        self.config = self._with_planned_inputs(config)
+        config = self.config
         self.policy = SafetyPolicy(
             config.effective_allowed_domains,
             allow_risky=config.allow_risky,
@@ -84,6 +88,41 @@ class InteractiveAgent:
         except BaseException:
             self.browser.close()
             raise
+
+    def _with_planned_inputs(self, config: RunConfig) -> RunConfig:
+        planner = getattr(self.engine, "plan_literal_inputs", None)
+        if not callable(planner):
+            return config
+        try:
+            planned = planner(config.goal)
+        except (OSError, RuntimeError, ValueError) as error:
+            self.planning_warning = f"Local field planning unavailable: {error}"
+            return config
+        if not planned:
+            return config
+        return cast(RunConfig, replace(
+            config,
+            prepared_inputs={**planned, **config.prepared_inputs},
+        ))
+
+    def _step_verified(self, disposition: str) -> bool:
+        if not planned_search_evidence(
+            self.config.goal, self.config.prepared_inputs, self.snapshot
+        ):
+            return False
+        if disposition == "verified":
+            return True
+        confirm = getattr(self.engine, "confirm_step_completion", None)
+        return bool(
+            disposition == "confirm" and self.progress.current_step
+            and callable(confirm)
+            and confirm(
+                goal=self.config.goal,
+                current_step=self.progress.current_step,
+                snapshot=self.snapshot,
+                history=self.history,
+            ) >= 0.45
+        )
 
     @property
     def elapsed_ms(self) -> float:
@@ -173,18 +212,7 @@ class InteractiveAgent:
                 self.actions = ()
                 return self.state()
             disposition = step_completion_disposition(self.progress, self.decision, self.history)
-            step_verified = disposition == "verified"
-            confirm_step = getattr(self.engine, "confirm_step_completion", None)
-            if disposition == "confirm" and self.progress.current_step and callable(confirm_step):
-                step_verified = (
-                    confirm_step(
-                        goal=self.config.goal,
-                        current_step=self.progress.current_step,
-                        snapshot=self.snapshot,
-                        history=self.history,
-                    )
-                    >= 0.45
-                )
+            step_verified = self._step_verified(disposition)
             if self.progress.current_step and step_verified:
                 self.progress.advance_current_step(self.snapshot, action_count=len(self.history))
                 self.decision = None
@@ -411,6 +439,8 @@ class InteractiveAgent:
 
     def retask(self, config: RunConfig) -> dict[str, Any]:
         """Start a new task state while preserving the current browser target."""
+        self.planning_warning = None
+        config = self._with_planned_inputs(config)
         snapshot = self.browser.observe()
         screenshot = self._screenshot()
         progress = TaskProgress.from_goal(config.goal)
@@ -505,6 +535,7 @@ class InteractiveAgent:
             "max_seconds": self.config.max_seconds,
             "model": self.config.model,
             "network_model_calls": 0,
+            "planning_warning": self.planning_warning,
         }
 
     def close(self) -> None:

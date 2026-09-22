@@ -47,6 +47,23 @@ def step_requests_submission(step: str) -> bool:
     return bool(re.search(r"\b(?:search|find|lookup|submit)\b", step, re.IGNORECASE))
 
 
+def planned_search_evidence(
+    goal: str, prepared_inputs: dict[str, str], snapshot: BrowserSnapshot
+) -> bool:
+    """Do not equate opening a flight-search page with obtaining requested results."""
+    required = {key: prepared_inputs.get(key) for key in ("where from", "where to", "departure")}
+    if "flight" not in goal.casefold() or not all(required.values()):
+        return True
+    values = {element.name.casefold(): element.value.casefold() for element in snapshot.elements}
+    if not all(
+        any(key in label and expected.casefold() in value for label, value in values.items())
+        for key, expected in required.items()
+    ):
+        return False
+    text = snapshot.visible_text.casefold()
+    return "top departing flights" in text
+
+
 def requested_scroll_direction(step: str) -> ActionKind | None:
     """Use the latest explicit direction, including in spoken corrections."""
     matches = list(re.finditer(r"\bscroll\s+(up|down)\b", step, re.IGNORECASE))

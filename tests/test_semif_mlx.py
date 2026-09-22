@@ -165,5 +165,6 @@ def test_semif_rejects_wrong_quantization(tmp_path, monkeypatch):
         json.dumps({"model_type": "qwen3_5", "quantization": {"bits": 8}})
     )
     monkeypatch.setattr(semif_mlx, "snapshot_download", lambda *_a, **_k: str(tmp_path))
+    semif_mlx.load_local_text_model.cache_clear()
     with pytest.raises(ValueError, match="pinned"):
         SemIfMLXPredictor()

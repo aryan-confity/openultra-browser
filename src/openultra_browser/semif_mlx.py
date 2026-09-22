@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from functools import lru_cache
 from pathlib import Path
 
 import mlx.core as mx
@@ -73,32 +74,36 @@ def _question_choices(question: dict) -> tuple[list[str], list[str]]:
     return choices, descriptions
 
 
+@lru_cache(maxsize=1)
+def load_local_text_model():
+    """Share one pinned local checkpoint between text planning and SemIf scoring."""
+    try:
+        from mlx_lm import load
+    except ImportError as error:
+        raise RuntimeError("Local planning requires: pip install 'openultra-browser[semif]'") from error
+    directory = Path(
+        snapshot_download(
+            SEMIF_REPOSITORY,
+            revision=SEMIF_REVISION,
+            allow_patterns=["*.json", "*.safetensors", "*.jinja", "*.txt", "*.model"],
+        )
+    )
+    config = json.loads((directory / "config.json").read_text())
+    quantization = config.get("quantization") or config.get("quantization_config") or {}
+    if config.get("model_type") != "qwen3_5" or quantization.get("bits") != 4:
+        raise ValueError("Local text checkpoint must be the pinned Qwen3.5 4-bit MLX model")
+    mx.set_cache_limit(256 * 1024 * 1024)
+    model, tokenizer = load(directory, tokenizer_config={"trust_remote_code": False})
+    model.eval()
+    mx.eval(model.parameters())
+    return model, tokenizer
+
+
 class SemIfMLXPredictor:
     """Score declared options from Qwen3.5 next-token logits, without generation."""
 
     def __init__(self) -> None:
-        try:
-            from mlx_lm import load
-        except ImportError as error:
-            raise RuntimeError("SemIf requires: pip install 'openultra-browser[semif]'") from error
-        directory = Path(
-            snapshot_download(
-                SEMIF_REPOSITORY,
-                revision=SEMIF_REVISION,
-                allow_patterns=["*.json", "*.safetensors", "*.jinja", "*.txt", "*.model"],
-            )
-        )
-        config = json.loads((directory / "config.json").read_text())
-        quantization = config.get("quantization") or config.get("quantization_config") or {}
-        if config.get("model_type") != "qwen3_5" or quantization.get("bits") != 4:
-            raise ValueError("SemIf checkpoint must be the pinned Qwen3.5 4-bit MLX model")
-        mx.set_cache_limit(256 * 1024 * 1024)
-        self.model, self.tokenizer = load(
-            directory,
-            tokenizer_config={"trust_remote_code": False},
-        )
-        self.model.eval()
-        mx.eval(self.model.parameters())
+        self.model, self.tokenizer = load_local_text_model()
         self.slots = []
         for letter in LETTERS:
             ids = self.tokenizer.encode(letter, add_special_tokens=False)

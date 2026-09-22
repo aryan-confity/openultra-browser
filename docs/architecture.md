@@ -11,6 +11,13 @@ coordinates. It sees:
 - recent action outcomes;
 - a finite dictionary of action IDs and semantic descriptions.
 
+When MLX-LM is installed, a separate local Qwen3.5 text pass runs once at task start, before
+the typed-decision loop. It proposes structured field values only. The executor accepts a value
+only if it occurs literally in the user task and its field is allowlisted; explicit prepared
+inputs take precedence. Website/page instructions and completion claims from that pass are
+discarded. SemIf and this planner share one pinned MLX checkpoint in memory. With the optional
+runtime absent or disabled, the smaller deterministic input extractor remains available.
+
 The operation, compatible-target, completion, and stuck questions are independent rows in one local
 MLX batch. Target heads exist only for operations currently supported by visible controls. The
 runtime combines operation and target probabilities for safe fallback, and treats every answer as a
@@ -57,6 +64,9 @@ The planner may tell the model that a hidden prepared value overlaps the goal, b
 value itself in model state, traces, or action descriptions.
 Direct goal matching uses accessible labels, not query terms embedded in destination URLs. URLs are
 retained separately for domain policy and navigation guards.
+For an explicit flight route, a result whose visible label reverses origin and destination is
+excluded. On Google results, the first-party Flights category is preferred to a sponsored
+external booking link. This is a narrow observation rule, not permission to skip page verification.
 When a caller supplies a success URL prefix, an observed link to that prefix receives an explicit
 planner fact. The model still chooses the operation and target; completion is checked only after navigation.
 URL-regex postconditions support dynamic result routes without preselecting a concrete result ID.
@@ -99,6 +109,9 @@ the result. A changed fingerprint records progress. Three consecutive non-wait n
 run. Deterministic visible-text and URL checks can complete a run. If multiple checks are configured,
 all must pass. Without configured checks, `done` must pass both the in-step completion head and a
 second focused local Boolean confirmation.
+For a flight search with locally extracted route/date values, completion additionally requires
+those values in the observed controls and visible search results; opening the search page alone
+is insufficient.
 
 ## Local inspector
 
