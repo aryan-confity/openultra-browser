@@ -1,4 +1,6 @@
-from openultra_browser.browser import Browser
+import pytest
+
+from openultra_browser.browser import Browser, ExecutionUncertain, StalePage
 from openultra_browser.models import (
     ActionKind,
     BrowserSnapshot,
@@ -333,3 +335,102 @@ def test_switch_tab_executes_only_an_owned_committed_target():
     assert browser.act(action, snapshot, {})
     assert browser.target == "older"
     assert "selected existing browser tab" in browser.last_action_evidence
+
+
+def _action_browser(snapshot):
+    browser = object.__new__(Browser)
+    calls = []
+    browser.target = "current"
+    browser.targets = ["current"]
+    browser._page_targets = lambda: {"current": {"targetId": "current", "url": snapshot.url}}
+    browser.call = lambda method, **params: calls.append((method, params)) or {}
+    browser.evaluate = lambda expression, **_kwargs: (
+        {"x": 30, "y": 40, "autocomplete": False}
+        if "expectedGuard" in expression
+        else snapshot.url
+    )
+    browser._settle = lambda *_args, **_kwargs: False
+    browser._adopt_new_target = lambda *_args, **_kwargs: False
+    return browser, calls
+
+
+def test_observe_uses_one_observation_and_attaches_browser_history(monkeypatch):
+    snapshot = BrowserSnapshot("https://example.com", "Page", "Page text", ())
+    browser, _calls = _action_browser(snapshot)
+    browser.text_limit = 1200
+    browser.ensure_active_http_target = lambda: snapshot.url
+    browser._can_go_back = lambda _fallback: True
+    browser._observed_tabs = lambda: ()
+    monkeypatch.setattr("openultra_browser.browser.decode_observation", lambda _raw: snapshot)
+
+    observed = browser.observe()
+
+    assert observed.can_go_back is True
+    assert observed.visible_text == "Page text"
+
+
+@pytest.mark.parametrize("kind,delta", [(ActionKind.SCROLL_DOWN, 560), (ActionKind.SCROLL_UP, -560)])
+def test_scroll_actions_dispatch_directional_wheel(kind, delta):
+    snapshot = BrowserSnapshot("https://example.com", "Page", "Text", ())
+    browser, calls = _action_browser(snapshot)
+    action = CandidateAction("scroll", kind, "Scroll")
+
+    assert browser.act(action, snapshot, {}) is False
+    assert calls[0][0] == "Input.dispatchMouseEvent"
+    assert calls[0][1]["deltaY"] == delta
+
+
+def test_back_wait_and_terminal_actions_do_not_click():
+    snapshot = BrowserSnapshot("https://example.com", "Page", "Text", ())
+    browser, calls = _action_browser(snapshot)
+    browser.evaluate = lambda _expression, **_kwargs: snapshot.url
+    for kind in (ActionKind.BACK, ActionKind.WAIT, ActionKind.DONE, ActionKind.BLOCKED):
+        assert browser.act(CandidateAction(kind.value, kind, kind.value), snapshot, {}) is False
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", [ActionKind.CLICK, ActionKind.FILL, ActionKind.PRESS_ENTER, ActionKind.SELECT])
+def test_element_actions_send_only_observed_target(kind):
+    element = ObservedElement("e1", "button" if kind == ActionKind.CLICK else "textbox", "Target", "button", guard="guard")
+    snapshot = BrowserSnapshot("https://example.com", "Page", "Text", (element,))
+    browser, calls = _action_browser(snapshot)
+    action = CandidateAction(
+        kind.value, kind, "Target", "e1",
+        input_key="name" if kind == ActionKind.FILL else None,
+        option="Option" if kind == ActionKind.SELECT else None,
+        option_value="value" if kind == ActionKind.SELECT else None,
+    )
+
+    assert browser.act(action, snapshot, {"name": "literal value"}) is False
+    if kind == ActionKind.CLICK:
+        assert [event[1]["type"] for event in calls] == ["mousePressed", "mouseReleased"]
+    elif kind == ActionKind.FILL:
+        assert ("Input.insertText", {"text": "literal value"}) in calls
+    elif kind == ActionKind.PRESS_ENTER:
+        assert [event[1]["type"] for event in calls] == ["rawKeyDown", "keyUp"]
+    else:
+        assert calls == []
+
+
+def test_stale_and_missing_targets_fail_before_input():
+    snapshot = BrowserSnapshot("https://example.com", "Page", "Text", ())
+    browser, calls = _action_browser(snapshot)
+    browser.evaluate = lambda _expression, **_kwargs: "https://example.com/changed"
+    with pytest.raises(StalePage):
+        browser.act(CandidateAction("click", ActionKind.CLICK, "Target", "e1"), snapshot, {})
+    assert calls == []
+
+    browser.evaluate = lambda _expression, **_kwargs: snapshot.url
+    with pytest.raises(ValueError):
+        browser.act(CandidateAction("click", ActionKind.CLICK, "Target"), snapshot, {})
+    with pytest.raises(RuntimeError, match="absent"):
+        browser.act(CandidateAction("click", ActionKind.CLICK, "Target", "e1"), snapshot, {})
+
+
+def test_dispatch_failure_after_input_is_not_safe_to_retry():
+    element = ObservedElement("e1", "button", "Next", "button", guard="guard")
+    snapshot = BrowserSnapshot("https://example.com", "Page", "Text", (element,))
+    browser, _calls = _action_browser(snapshot)
+    browser.call = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("transport lost"))
+    with pytest.raises(ExecutionUncertain, match="completion could not be confirmed"):
+        browser.act(CandidateAction("click", ActionKind.CLICK, "Next", "e1"), snapshot, {})

@@ -133,6 +133,19 @@ def test_done_requires_independent_completion_confidence():
     assert "completion confidence" in decision.reason
 
 
+def test_sole_done_can_confirm_an_initially_satisfied_navigation():
+    done = CandidateAction("done", ActionKind.DONE, "Finish verified steps")
+    proposal = ModelDecision("done", {"done": 1.0}, 1.0, 0.95, 0.0, 5, 100)
+    result = SafetyPolicy(frozenset({"example.com"})).choose(
+        decision=proposal,
+        actions=(done,),
+        snapshot=page(),
+        history=(),
+    )
+
+    assert result.executed_action == "done"
+
+
 def test_done_requires_observed_progress_and_no_visible_goal_action():
     done = CandidateAction("done", ActionKind.DONE, "Finish")
     click = CandidateAction("click", ActionKind.CLICK, "Open final result", "e0", goal_match=True)

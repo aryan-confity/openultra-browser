@@ -20,13 +20,16 @@ from .models import (
 )
 from .observation import build_actions
 from .policy import SafetyPolicy
-from .progress import repeats_action_cycle
+from .progress import exhausted_scroll_exploration, repeats_action_cycle
 from .task_progress import (
     TaskProgress,
+    click_outcome_evidence,
     error_blocks_progress,
     login_blocks_progress,
     step_completion_disposition,
     summarize_page_change,
+    verified_scroll_step,
+    verified_skip_ad_step,
 )
 
 TERMINAL_STATUSES = {
@@ -216,8 +219,10 @@ class InteractiveAgent:
         policy_result = self.policy_result
         self.decision = None
         self.policy_result = None
-        by_id = {action.action_id: action for action in self.actions}
-        chosen = by_id.get(policy_result.executed_action or "")
+        chosen = next(
+            (action for action in self.actions if action.action_id == policy_result.executed_action),
+            None,
+        )
         if chosen is None:
             self.status = "blocked"
             self.reason = policy_result.reason or "No executable action remained"
@@ -237,37 +242,49 @@ class InteractiveAgent:
             policy_intervened=policy_result.intervened,
             policy_reason=policy_result.reason,
         )
-        step_started = time.perf_counter()
-        source_snapshot = self.snapshot
-        if chosen.kind == ActionKind.DONE:
-            self.history.append(record)
-            confirm = getattr(self.engine, "confirm_completion", None)
-            confirmation = (
-                confirm(
-                    goal=self.config.goal,
-                    snapshot=self.snapshot,
-                    history=self.history,
-                )
-                if callable(confirm)
-                else 0.0
-            )
-            if confirmation >= 0.45:
-                self.status = "completed"
-                self.reason = (
-                    "Verified atomic outcomes accepted by the independent completion check"
-                )
-            else:
-                self.status = "needs_verification"
-                self.reason = (
-                    "The model proposed completion without sufficient independent evidence"
-                )
+        if self._finish_terminal_choice(chosen, record):
             return self.state()
 
+        step_started = time.perf_counter()
+        source_snapshot = self.snapshot
+        skip_verified = self._execute_selected_action(chosen, record, source_snapshot)
+        record.elapsed_ms = (time.perf_counter() - step_started) * 1_000
+        self.history.append(record)
+        self._remember_action(record, source_snapshot, self.snapshot)
+        self.screenshot = self._screenshot()
+        self._verify_requested_progress(skip_verified)
+        self._detect_stuck()
+        if self.status == "ready":
+            self._refresh()
+        return self.state()
+
+    def _finish_terminal_choice(self, chosen: CandidateAction, record: StepRecord) -> bool:
         if chosen.kind == ActionKind.BLOCKED:
             self.status, self.reason = "blocked", "No supported observed action can make progress"
             self.history.append(record)
-            return self.state()
+            return True
+        if chosen.kind != ActionKind.DONE:
+            return False
+        self.history.append(record)
+        confirm = getattr(self.engine, "confirm_completion", None)
+        confirmation = (
+            confirm(goal=self.config.goal, snapshot=self.snapshot, history=self.history)
+            if callable(confirm) else 0.0
+        )
+        if confirmation >= 0.45:
+            self.status = "completed"
+            self.reason = "Verified atomic outcomes accepted by the independent completion check"
+        else:
+            self.status = "needs_verification"
+            self.reason = "The model proposed completion without sufficient independent evidence"
+        return True
 
+    def _execute_selected_action(
+        self,
+        chosen: CandidateAction,
+        record: StepRecord,
+        source_snapshot: BrowserSnapshot,
+    ) -> bool:
         try:
             transport_verified = bool(
                 self.browser.act(chosen, self.snapshot, self.config.prepared_inputs)
@@ -276,46 +293,72 @@ class InteractiveAgent:
             if evidence:
                 record.description += f" Execution evidence: {evidence}."
             next_snapshot = self.browser.observe()
-            record.change_summary = summarize_page_change(self.snapshot, next_snapshot)
+            record.change_summary = summarize_page_change(source_snapshot, next_snapshot)
+            click_evidence = click_outcome_evidence(chosen, source_snapshot, next_snapshot)
+            if click_evidence:
+                record.change_summary += f" | {click_evidence}"
+            skip_verified = verified_skip_ad_step(
+                self.progress, chosen, source_snapshot, next_snapshot
+            )
+            if skip_verified:
+                record.change_summary += " | Skip Ad control disappeared on the same page"
             record.changed = (
-                next_snapshot.semantic_fingerprint != self.snapshot.semantic_fingerprint
+                next_snapshot.semantic_fingerprint != source_snapshot.semantic_fingerprint
                 or transport_verified
+                or abs(next_snapshot.scroll_y - source_snapshot.scroll_y) >= 1
             )
             self.snapshot = next_snapshot
-            self.status = "ready"
-            self.reason = "Page observed and ready for a decision"
+            self.status, self.reason = "ready", "Page observed and ready for a decision"
+            return skip_verified
         except StalePage as error:
             record.executed_action = None
             record.action_error = f"{type(error).__name__}: {error}"
             self.snapshot = self.browser.observe()
-            self.status = "ready"
-            self.reason = "Page changed before input; observation refreshed"
+            self.status, self.reason = "ready", "Page changed before input; observation refreshed"
         except ExecutionUncertain as error:
             record.action_error = f"{type(error).__name__}: {error}"
-            self.status = "needs_verification"
-            self.reason = str(error)
+            self.status, self.reason = "needs_verification", str(error)
         except Exception as error:
             record.action_error = f"{type(error).__name__}: {error}"
             self.status = "ready"
             self.reason = "Action failed before confirmed progress; inspect and choose again"
-        record.elapsed_ms = (time.perf_counter() - step_started) * 1_000
-        self.history.append(record)
-        self._remember_action(record, source_snapshot, self.snapshot)
-        self.screenshot = self._screenshot()
+        return False
+
+    def _verify_requested_progress(self, skip_verified: bool) -> None:
+        if self.status != "ready":
+            return
+        if verified_scroll_step(self.progress, self.history):
+            self.progress.advance_current_step(self.snapshot, action_count=len(self.history))
+            if self.progress.complete and not self._has_success_verifier():
+                self.status, self.reason = (
+                    "completed", "Verified requested scroll direction and movement"
+                )
+        if self.status == "ready" and skip_verified:
+            self.progress.advance_current_step(self.snapshot, action_count=len(self.history))
+            if self.progress.complete and not self._has_success_verifier():
+                self.status, self.reason = "completed", "Verified Skip Ad control disappeared"
+
+    def _has_success_verifier(self) -> bool:
+        return bool(
+            self.config.success_text or self.config.success_url_prefix
+            or self.config.success_url_regex
+        )
+
+    def _detect_stuck(self) -> None:
+        if self.status != "ready":
+            return
         if (
-            self.status == "ready"
-            and len(self.history) >= 3
+            len(self.history) >= 3
             and all(not row.changed and row.executed_action != "wait" for row in self.history[-3:])
         ):
+            self.status, self.reason = "stuck", "Three consecutive actions produced no observable change"
+        elif repeats_action_cycle(self.history):
+            self.status, self.reason = (
+                "stuck", "A repeated action sequence produced no durable task progress"
+            )
+        elif exhausted_scroll_exploration(self.history):
             self.status = "stuck"
-            self.reason = "Three consecutive actions produced no observable change"
-        if self.status == "ready" and repeats_action_cycle(self.history):
-            self.status = "stuck"
-            self.reason = "A repeated action sequence produced no durable task progress"
-        if self.status == "ready":
-            self._refresh()
-        return self.state()
-
+            self.reason = "Paused after six same-direction exploration scrolls without a matching target"
     def _remember_action(
         self,
         record: StepRecord,

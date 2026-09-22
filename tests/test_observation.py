@@ -116,8 +116,7 @@ def test_search_already_represented_by_url_is_not_submitted_again():
         8,
         False,
         context_goal=(
-            "Go to youtube.com and search for Neon AI stream and click on it "
-            "and dislike his video"
+            "Go to youtube.com and search for Neon AI stream and click on it and dislike his video"
         ),
     )
 
@@ -152,8 +151,7 @@ def test_retained_search_field_cannot_hijack_a_later_click_step():
         20,
         False,
         context_goal=(
-            "Go to youtube.com and search for Neon AI stream and click on it "
-            "and dislike his video"
+            "Go to youtube.com and search for Neon AI stream and click on it and dislike his video"
         ),
     )
 
@@ -244,7 +242,7 @@ def test_observer_marks_form_associated_search_textareas_as_submittable():
 
 def test_observer_includes_broad_interactive_surfaces_and_rejects_covered_targets():
     assert "[onclick]" in OBSERVE_SCRIPT
-    assert "[tabindex]:not([tabindex=\"-1\"])" in OBSERVE_SCRIPT
+    assert '[tabindex]:not([tabindex="-1"])' in OBSERVE_SCRIPT
     assert "getComputedStyle(node).cursor !== 'pointer'" in OBSERVE_SCRIPT
     assert "!node.contains(top)" in OBSERVE_SCRIPT
 
@@ -491,6 +489,63 @@ def test_scroll_controls_match_observed_page_capability():
 
     assert "scroll_down" in {action.action_id for action in result}
     assert "scroll_up" not in {action.action_id for action in result}
+
+
+def test_spoken_scroll_correction_excludes_the_old_direction():
+    current = BrowserSnapshot(
+        "https://example.com/results",
+        "Results",
+        "More listings",
+        (),
+        can_scroll_up=True,
+        can_scroll_down=True,
+        scroll_y=1120,
+    )
+
+    result = build_actions(current, "you're just scrolling down scroll up", {}, 8, False)
+
+    assert [action.action_id for action in result] == ["scroll_up"]
+    assert result[0].goal_match
+
+
+def test_explicit_scroll_down_is_the_only_direction_offered():
+    current = BrowserSnapshot(
+        "https://example.com/results",
+        "Results",
+        "More listings",
+        (),
+        can_scroll_up=True,
+        can_scroll_down=True,
+        scroll_y=560,
+    )
+
+    result = build_actions(current, "scroll down", {}, 8, False)
+
+    assert [action.action_id for action in result] == ["scroll_down"]
+
+
+def test_skip_ad_uses_only_a_visible_skip_control():
+    current = BrowserSnapshot(
+        "https://example.com/watch",
+        "Player",
+        "Advertisement",
+        (
+            ObservedElement("skip", "button", "Skip Ad", "button"),
+            ObservedElement("menu", "button", "More", "button"),
+        ),
+        can_scroll_down=True,
+    )
+
+    result = build_actions(current, "skip the ad", {}, 8, False)
+
+    assert [action.action_id for action in result] == ["click_skip"]
+    assert result[0].goal_match
+
+
+def test_skip_ad_does_not_guess_when_control_is_not_visible():
+    result = build_actions(snapshot(), "skip the ad", {}, 8, False)
+
+    assert [action.action_id for action in result] == ["blocked"]
 
 
 def test_unexplored_content_marks_scroll_as_progress_instead_of_waiting():
@@ -791,7 +846,11 @@ def test_requested_native_option_is_selected_and_submit_waits():
                 "combobox",
                 "Rent or Sell",
                 "select",
-                options=(ObservedOption("Choose", ""), ObservedOption("Rent", "rent"), ObservedOption("Sell", "sell")),
+                options=(
+                    ObservedOption("Choose", ""),
+                    ObservedOption("Rent", "rent"),
+                    ObservedOption("Sell", "sell"),
+                ),
             ),
             ObservedElement("e2", "button", "Send", "button"),
         ),

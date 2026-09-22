@@ -124,6 +124,7 @@ class BrowserSnapshot:
     can_go_back: bool = False
     alerts: tuple[str, ...] = ()
     tabs: tuple[ObservedTab, ...] = ()
+    scroll_y: float = 0.0
 
     @property
     def fingerprint(self) -> str:
@@ -131,6 +132,7 @@ class BrowserSnapshot:
             "url": self.url,
             "title": self.title,
             "text": self.visible_text,
+            "scroll_y": self.scroll_y,
             "elements": [asdict(element) for element in self.elements],
             "tabs": [asdict(tab) for tab in self.tabs],
         }
@@ -155,8 +157,7 @@ class BrowserSnapshot:
             "text": self.visible_text,
             "elements": elements,
             "tabs": [
-                {"title": tab.title, "url": tab.url, "active": tab.active}
-                for tab in self.tabs
+                {"title": tab.title, "url": tab.url, "active": tab.active} for tab in self.tabs
             ],
         }
         return hashlib.sha256(

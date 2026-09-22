@@ -18,6 +18,7 @@ from .task_setup import plan_task
 from .voice import prepare_voice_candidate, should_commit_voice_candidate
 
 STATIC_ROOT = Path(__file__).with_name("static")
+START_TASK_FIRST = "Start a task first"
 
 
 class InspectorController:
@@ -95,7 +96,7 @@ class InspectorController:
 
     def retask(self, body: dict) -> dict:
         if self.agent is None:
-            raise ValueError("Start a task first")
+            raise ValueError(START_TASK_FIRST)
         continuation_url = getattr(self.agent, "continuation_url", None)
         current_url = (
             continuation_url()
@@ -109,7 +110,7 @@ class InspectorController:
 
     def frame(self) -> dict:
         if self.agent is None:
-            raise ValueError("Start a task first")
+            raise ValueError(START_TASK_FIRST)
         return self.agent.capture_frame()
 
     def voice_plan(self, body: dict) -> dict:
@@ -147,7 +148,7 @@ class InspectorController:
         if name == "voice-plan":
             return self.voice_plan(body)
         if self.agent is None:
-            raise ValueError("Start a task first")
+            raise ValueError(START_TASK_FIRST)
         if body.get("run_id") != self.run_id:
             raise ValueError("This task was replaced by a newer run")
         if name == "retask":
@@ -209,6 +210,88 @@ def _bounded_float(value, name: str, minimum: float, maximum: float) -> float:
     return parsed
 
 
+def _handle_get(self, controller, lock, token: str) -> None:
+    if not self._local_host():
+        self._send(403, "Forbidden", "text/plain; charset=utf-8")
+        return
+    path = urlparse(self.path).path
+    if path == "/api/state":
+        with lock:
+            self._json(200, controller.state())
+        return
+    if path == "/api/frame":
+        if self.headers.get("X-Inspector-Token") != token:
+            self._json(403, {"error": "Local inspector requests only"})
+            return
+        if not lock.acquire(blocking=False):
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        try:
+            self._json(200, controller.frame())
+        except (ValueError, RuntimeError):
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+        finally:
+            lock.release()
+        return
+    files = {
+        "/": ("inspector.html", "text/html; charset=utf-8"),
+        "/app.js": ("inspector.js", "text/javascript; charset=utf-8"),
+        "/style.css": ("inspector.css", "text/css; charset=utf-8"),
+    }
+    if path not in files:
+        self._send(404, "Not found", "text/plain; charset=utf-8")
+        return
+    filename, mime = files[path]
+    content = (STATIC_ROOT / filename).read_text(encoding="utf-8")
+    if filename == "inspector.html":
+        content = content.replace("__TOKEN__", token)
+    self._send(200, content, mime)
+
+
+def _handle_post(self, controller, lock, token: str, origin: str, reset_requested) -> None:
+    if (
+        not self._local_host()
+        or self.headers.get("X-Inspector-Token") != token
+        or self.headers.get("Origin") != origin
+    ):
+        self._json(403, {"error": "Local inspector requests only"})
+        return
+    command_name = self.path.removeprefix("/api/")
+    is_reset = command_name == "reset"
+    if is_reset:
+        reset_requested.set()
+    elif reset_requested.is_set():
+        self._json(409, {"error": "A newer task is taking control"})
+        return
+    acquired = lock.acquire(timeout=120)
+    if not acquired:
+        if is_reset:
+            reset_requested.clear()
+        self._json(503, {"error": "The browser command did not finish in time"})
+        return
+    try:
+        length = int(self.headers.get("Content-Length", "0"))
+        if not 1 <= length <= 32_768:
+            raise ValueError("Invalid request size")
+        body = json.loads(self.rfile.read(length))
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be an object")
+        result = controller.command(command_name, body)
+        self._json(200, result)
+    except (ValueError, RuntimeError, TimeoutError) as error:
+        self._json(400, {"error": str(error)})
+    except Exception:
+        self._json(500, {"error": "Inspector command failed; no automatic retry occurred"})
+    finally:
+        lock.release()
+        if is_reset:
+            reset_requested.clear()
+
+
 def run_inspector(
     *,
     port: int = 8766,
@@ -217,6 +300,7 @@ def run_inspector(
 ) -> None:
     if not 1_024 <= port <= 65_535:
         raise ValueError("port must be between 1024 and 65535")
+    # Loopback HTTP avoids distributing a self-signed certificate; mutations still require token and Origin.
     origin = f"http://127.0.0.1:{port}"
     expected_host = f"127.0.0.1:{port}"
     token = secrets.token_urlsafe(32)
@@ -245,85 +329,10 @@ def run_inspector(
             return self.headers.get("Host") == expected_host
 
         def do_GET(self) -> None:
-            if not self._local_host():
-                self._send(403, "Forbidden", "text/plain; charset=utf-8")
-                return
-            path = urlparse(self.path).path
-            if path == "/api/state":
-                with lock:
-                    self._json(200, controller.state())
-                return
-            if path == "/api/frame":
-                if self.headers.get("X-Inspector-Token") != token:
-                    self._json(403, {"error": "Local inspector requests only"})
-                    return
-                if not lock.acquire(blocking=False):
-                    self.send_response(204)
-                    self.send_header("Cache-Control", "no-store")
-                    self.end_headers()
-                    return
-                try:
-                    self._json(200, controller.frame())
-                except (ValueError, RuntimeError):
-                    self.send_response(204)
-                    self.send_header("Cache-Control", "no-store")
-                    self.end_headers()
-                finally:
-                    lock.release()
-                return
-            files = {
-                "/": ("inspector.html", "text/html; charset=utf-8"),
-                "/app.js": ("inspector.js", "text/javascript; charset=utf-8"),
-                "/style.css": ("inspector.css", "text/css; charset=utf-8"),
-            }
-            if path not in files:
-                self._send(404, "Not found", "text/plain; charset=utf-8")
-                return
-            filename, mime = files[path]
-            content = (STATIC_ROOT / filename).read_text(encoding="utf-8")
-            if filename == "inspector.html":
-                content = content.replace("__TOKEN__", token)
-            self._send(200, content, mime)
+            _handle_get(self, controller, lock, token)
 
         def do_POST(self) -> None:
-            if (
-                not self._local_host()
-                or self.headers.get("X-Inspector-Token") != token
-                or self.headers.get("Origin") != origin
-            ):
-                self._json(403, {"error": "Local inspector requests only"})
-                return
-            command_name = self.path.removeprefix("/api/")
-            is_reset = command_name == "reset"
-            if is_reset:
-                reset_requested.set()
-            elif reset_requested.is_set():
-                self._json(409, {"error": "A newer task is taking control"})
-                return
-            acquired = lock.acquire(timeout=120)
-            if not acquired:
-                if is_reset:
-                    reset_requested.clear()
-                self._json(503, {"error": "The browser command did not finish in time"})
-                return
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 1 <= length <= 32_768:
-                    raise ValueError("Invalid request size")
-                body = json.loads(self.rfile.read(length))
-                if not isinstance(body, dict):
-                    raise ValueError("Request body must be an object")
-                result = controller.command(command_name, body)
-                self._json(200, result)
-            except (ValueError, RuntimeError, TimeoutError) as error:
-                self._json(400, {"error": str(error)})
-            except Exception:
-                self._json(500, {"error": "Inspector command failed; no automatic retry occurred"})
-            finally:
-                lock.release()
-                if is_reset:
-                    reset_requested.clear()
-
+            _handle_post(self, controller, lock, token, origin, reset_requested)
         def log_message(self, *_args) -> None:
             return
 

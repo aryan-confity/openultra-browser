@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from openultra_browser import inspector as inspector_module
 from openultra_browser.cli import build_parser
 from openultra_browser.inspector import (
     STATIC_ROOT,
@@ -46,7 +47,7 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
     assert 'id="voice-mode"' in html
     assert 'id="cancel-voice"' in html
     assert 'id="run-transcript"' in html
-    assert "window.SpeechRecognition || window.webkitSpeechRecognition" in script
+    assert "globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition" in script
     assert "navigator.brave.isBrave" in script
     assert "does not yet provide a working recognition engine" in script
     assert "This local address is secure" in script
@@ -64,7 +65,7 @@ def test_inspector_assets_are_task_first_live_and_single_screen():
 
 
 def test_inspector_static_assets_are_packaged_below_the_module():
-    assert STATIC_ROOT == Path(__file__).parents[1] / "src/openultra_browser/static"
+    assert STATIC_ROOT == Path(inspector_module.__file__).resolve().parent / "static"
     assert {path.name for path in STATIC_ROOT.iterdir()} == {
         "inspector.css",
         "inspector.html",

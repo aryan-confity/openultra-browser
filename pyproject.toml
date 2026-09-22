@@ -9,7 +9,7 @@ description = "Fast local browser control powered by typed decisions"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "Apache-2.0"
-license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"]
 authors = [{ name = "Aryan Confity" }]
 keywords = ["browser-agent", "browser-automation", "local-ai", "typed-decisions"]
 classifiers = [
@@ -28,7 +28,7 @@ dependencies = [
 Repository = "https://github.com/aryan-confity/openultra-browser"
 
 [project.optional-dependencies]
-dev = ["build>=1.2", "pytest>=8", "ruff>=0.12"]
+dev = ["build>=1.2", "pytest>=8", "pytest-cov>=6,<8", "ruff>=0.12"]
 
 [project.scripts]
 openultra-browser = "openultra_browser.cli:main"

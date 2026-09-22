@@ -18,7 +18,7 @@ let voicePlanQueued = null;
 let voiceFallbackCommand = "reset";
 let voiceRestartTimer = null;
 
-const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
+const escapeHtml = (value) => String(value ?? "").replaceAll(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[character]);
 
@@ -130,8 +130,8 @@ function stopVoice({ cancelled = false, preserveSession = false } = {}) {
 }
 
 function transcriptTail(fullText, committedText) {
-  const full = fullText.replace(/\s+/g, " ").trim();
-  const committed = committedText.replace(/\s+/g, " ").trim();
+  const full = fullText.replaceAll(/\s+/g, " ").trim();
+  const committed = committedText.replaceAll(/\s+/g, " ").trim();
   if (!full.toLocaleLowerCase().startsWith(committed.toLocaleLowerCase())) return "";
   return full.slice(committed.length)
     .replace(/^\s*(?:,|;|\band\s+then\b|\bthen\b|\band\b)+\s*/i, "")
@@ -215,6 +215,7 @@ async function drainVoiceTasks(session) {
 
 function enqueueVoiceTask(goal) {
   if (!voiceSession || !goal.trim()) return;
+  if (automatic) automatic = false;
   const command = voiceSession.nextCommand;
   voiceSession.nextCommand = "retask";
   voiceFallbackCommand = "retask";
@@ -253,7 +254,7 @@ function startRecognitionCycle(SpeechRecognition, generation) {
     if (generation !== voiceGeneration || recognition !== nextRecognition) return;
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const result = event.results[index];
-      const transcript = (result[0]?.transcript || "").replace(/\s+/g, " ").trim();
+      const transcript = (result[0]?.transcript || "").replaceAll(/\s+/g, " ").trim();
       if (!transcript || !voiceSession) continue;
       const utteranceId = voiceSession.utteranceId;
       byId("goal").value = transcript;
@@ -305,17 +306,20 @@ function startRecognitionCycle(SpeechRecognition, generation) {
 }
 
 function listenForTask(command) {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const SpeechRecognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
   const safari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
   const brave = Boolean(navigator.brave && typeof navigator.brave.isBrave === "function");
   if (!SpeechRecognition || safari || brave) {
     voiceFallbackCommand = command;
     byId("voice-label").textContent = "Transcript fallback";
-    byId("error").textContent = brave
-      ? "Brave exposes the speech API but does not yet provide a working recognition engine. Open OpenUltra in Chrome or Edge, or type the transcript and run it."
-      : safari
-        ? "Safari's speech service is unavailable for live voice here. This local address is secure; open OpenUltra in Chrome or Edge, or type the transcript and run it."
-        : "Live voice needs Chrome or Edge speech recognition. You can still type or paste the transcript and run it.";
+    let message = "Live voice needs Chrome or Edge speech recognition. You can still type or paste the transcript and run it.";
+    if (safari) {
+      message = "Safari's speech service is unavailable for live voice here. This local address is secure; open OpenUltra in Chrome or Edge, or type the transcript and run it.";
+    }
+    if (brave) {
+      message = "Brave exposes the speech API but does not yet provide a working recognition engine. Open OpenUltra in Chrome or Edge, or type the transcript and run it.";
+    }
+    byId("error").textContent = message;
     byId("error").hidden = false;
     updateTranscriptFallback(true);
     return;
@@ -363,7 +367,10 @@ function render() {
     error: "Runtime error",
   };
   byId("status").textContent = labels[state.status] || state.reason || state.status;
-  byId("status-dot").className = `status-dot ${terminal.has(state.status) ? (state.status === "completed" ? "" : "error") : state.page ? "active" : ""}`;
+  let statusClass = "";
+  if (terminal.has(state.status) && state.status !== "completed") statusClass = "error";
+  else if (!terminal.has(state.status) && state.page) statusClass = "active";
+  byId("status-dot").className = `status-dot ${statusClass}`;
   byId("engine-state").textContent = state.network_model_calls === 0 ? "Offline model" : "Model connected";
 
   const latestDecision = state.decision?.inference_ms
@@ -403,7 +410,9 @@ async function runAutomatically() {
   automatic = true;
   setControls();
   try {
-    for (let index = 0; index < state.max_steps * 2 && automatic; index += 1) {
+    for (let index = 0; index < state.max_steps * 2; index += 1) {
+      if (!automatic) break;
+      if (terminal.has(state.status)) break;
       byId("status").textContent = "Running";
       if (state.status !== "predicted") await call("predict");
       if (terminal.has(state.status)) break;
@@ -436,7 +445,7 @@ async function startTask(command = "reset", goal = byId("goal").value) {
       max_seconds: 180,
       max_candidates: 20,
     });
-    await runAutomatically();
+    if (!terminal.has(state.status)) await runAutomatically();
   } catch (error) {
     automatic = false;
     busy = false;
@@ -451,6 +460,9 @@ async function startTask(command = "reset", goal = byId("goal").value) {
     byId("error").textContent = error.message;
     byId("error").hidden = false;
     byId("status").textContent = "Paused";
+    setControls();
+  } finally {
+    busy = false;
     setControls();
   }
 }
@@ -499,12 +511,19 @@ byId("stop").addEventListener("click", () => {
   setControls();
 });
 
-fetch("/api/state").then((response) => response.json()).then((value) => {
-  state = value;
-  if (value.goal) byId("goal").value = value.goal;
-  syncTimer();
-  render();
-}).catch(() => { byId("status").textContent = "Local service unavailable"; });
+async function loadInitialState() {
+  try {
+    const response = await fetch("/api/state");
+    const value = await response.json();
+    state = value;
+    if (value.goal) byId("goal").value = value.goal;
+    syncTimer();
+    render();
+  } catch {
+    byId("status").textContent = "Local service unavailable";
+  }
+}
+document.addEventListener("DOMContentLoaded", loadInitialState);
 
 renderInputMode();
 

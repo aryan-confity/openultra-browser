@@ -25,16 +25,16 @@ SEARCH_PATTERN = re.compile(
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 PHONE_PATTERN = re.compile(r"(?<!\w)(\+?\d[\d ()-]{6,}\d)(?!\w)")
 NAME_PATTERN = re.compile(
-    r"\bname\s*(?:is|:|=)?\s*([A-Z][A-Za-z .'-]{1,79}?)(?=\s*(?:,|;|\band\b|$))",
+    r"\bname(?:\s+is|[:=])?\s+([a-z][a-z .'-]{0,78})(?=,|;|\s+and\b|$)",
     re.IGNORECASE,
 )
 SUBMIT_SEQUENCE_PATTERN = re.compile(
-    r"\bsubmit\s+([A-Za-z][A-Za-z .'-]{1,79}?)\s*,\s*(\+?\d[\d ()-]{6,}\d)",
+    r"\bsubmit\s+([a-z][a-z .'-]{1,79}?)\s*,\s*(\+?\d[\d ()-]{6,}\d)",
     re.IGNORECASE,
 )
 LINE_ID_PATTERNS = (
-    re.compile(r"\b([A-Za-z0-9_.@-]{2,80})\s+line\s+id\b", re.IGNORECASE),
-    re.compile(r"\bline\s+id\s*(?:is|:|=)\s*([A-Za-z0-9_.@-]{2,80})", re.IGNORECASE),
+    re.compile(r"\b([a-z0-9_.@-]{2,80})\s+line\s+id\b", re.IGNORECASE),
+    re.compile(r"\bline\s+id\s*(?:is|:|=)\s*([a-z0-9_.@-]{2,80})", re.IGNORECASE),
 )
 
 

@@ -81,6 +81,50 @@ def _validate_noul(answer: dict) -> float:
     return probability
 
 
+def _group_actions(actions: Sequence[CandidateAction]) -> dict[str, list[CandidateAction]]:
+    grouped: dict[str, list[CandidateAction]] = {}
+    for action in actions:
+        grouped.setdefault(OPERATION_BY_KIND[action.kind.value], []).append(action)
+    return grouped
+
+
+def _operation_criteria(grouped: dict[str, list[CandidateAction]]) -> dict[str, str]:
+    operations = {}
+    for operation, candidates in grouped.items():
+        description = OPERATION_DESCRIPTIONS[operation]
+        if any(action.goal_match for action in candidates):
+            description += " Deterministic planner: a goal-progress action exists: YES."
+        operations[operation] = description
+    return operations
+
+
+def _combine_scores(
+    grouped: dict[str, list[CandidateAction]],
+    answers: dict,
+    selected_operation: str,
+    operation_probabilities: dict[str, float],
+) -> tuple[dict[str, float], str, dict[str, float]]:
+    combined: dict[str, float] = {}
+    selected_target_probabilities: dict[str, float] = {}
+    proposed_action = ""
+    targeted = {"CLICK", "TYPE_TEXT", "SUBMIT", "SELECT", "SWITCH_TAB"}
+    for operation, candidates in grouped.items():
+        if operation in targeted:
+            answer = answers[f"{operation.lower()}_target"]
+            target_probabilities = _validate_answer(answer, {action.action_id for action in candidates})
+            for action in candidates:
+                combined[action.action_id] = operation_probabilities[operation] * target_probabilities[action.action_id]
+            if operation == selected_operation:
+                proposed_action = answer["choice"]
+                selected_target_probabilities = target_probabilities
+        else:
+            action = candidates[0]
+            combined[action.action_id] = operation_probabilities[operation]
+            if operation == selected_operation:
+                proposed_action = action.action_id
+    return combined, proposed_action, selected_target_probabilities
+
+
 class OpenUltraDecisionEngine:
     def __init__(self, model: str, *, optimize: bool = False, agent=None) -> None:
         self.model_path = model
@@ -141,15 +185,8 @@ class OpenUltraDecisionEngine:
         context_actions: Sequence[ActionContext] = (),
         previous_page: PageContext | None = None,
     ) -> ModelDecision:
-        grouped: dict[str, list[CandidateAction]] = {}
-        for action in actions:
-            grouped.setdefault(OPERATION_BY_KIND[action.kind.value], []).append(action)
-        operations = {}
-        for operation, candidates in grouped.items():
-            description = OPERATION_DESCRIPTIONS[operation]
-            if any(action.goal_match for action in candidates):
-                description += " Deterministic planner: a goal-progress action exists: YES."
-            operations[operation] = description
+        grouped = _group_actions(actions)
+        operations = _operation_criteria(grouped)
         recent = [
             {
                 "action": row.executed_action,
@@ -321,26 +358,9 @@ class OpenUltraDecisionEngine:
         operation_probabilities = _validate_answer(operation_answer, set(operations))
         selected_operation = operation_answer["choice"]
 
-        combined: dict[str, float] = {}
-        selected_target_probabilities: dict[str, float] = {}
-        proposed_action = ""
-        for operation, candidates in grouped.items():
-            if operation in targeted_operations:
-                answer = answers[f"{operation.lower()}_target"]
-                expected = {action.action_id for action in candidates}
-                target_probabilities = _validate_answer(answer, expected)
-                for action in candidates:
-                    combined[action.action_id] = (
-                        operation_probabilities[operation] * target_probabilities[action.action_id]
-                    )
-                if operation == selected_operation:
-                    proposed_action = answer["choice"]
-                    selected_target_probabilities = target_probabilities
-            else:
-                action = candidates[0]
-                combined[action.action_id] = operation_probabilities[operation]
-                if operation == selected_operation:
-                    proposed_action = action.action_id
+        combined, proposed_action, selected_target_probabilities = _combine_scores(
+            grouped, answers, selected_operation, operation_probabilities
+        )
 
         completion_probability = _validate_noul(answers["completion"])
         completion_change_probability = _validate_noul(answers["completion_change"])

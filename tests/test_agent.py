@@ -1,7 +1,7 @@
 from openultra_browser.agent import BrowserAgent
 from openultra_browser.browser import ExecutionUncertain, StalePage
 from openultra_browser.config import RunConfig
-from openultra_browser.models import BrowserSnapshot, ModelDecision
+from openultra_browser.models import ActionKind, BrowserSnapshot, ModelDecision
 
 
 class FakeBrowser:
@@ -192,6 +192,62 @@ def test_pre_input_staleness_reobserves_without_marking_action_executed():
     assert len(result.steps) == 1
     assert result.steps[0].executed_action is None
     assert result.steps[0].action_error.startswith("StalePage:")
+
+
+class ScrollingBrowser(FakeBrowser):
+    def __init__(self, url, *, text_limit):
+        super().__init__(url, text_limit=text_limit)
+        self.snapshot = BrowserSnapshot(
+            "https://example.com/results",
+            "Results",
+            "More content",
+            (),
+            can_scroll_up=True,
+            can_scroll_down=True,
+            scroll_y=1120,
+        )
+
+    def act(self, action, _snapshot, _prepared_inputs):
+        assert action.kind == ActionKind.SCROLL_UP
+        self.snapshot = BrowserSnapshot(
+            self.snapshot.url,
+            self.snapshot.title,
+            self.snapshot.visible_text,
+            (),
+            can_scroll_up=True,
+            can_scroll_down=True,
+            scroll_y=560,
+        )
+
+
+class ScrollChoiceEngine:
+    def decide(self, *, actions, **_kwargs):
+        return ModelDecision(
+            proposed_action="scroll_up",
+            probabilities={
+                action.action_id: float(action.action_id == "scroll_up") for action in actions
+            },
+            confidence=1.0,
+            goal_probability=0.0,
+            stuck_probability=0.0,
+            inference_ms=1.0,
+            input_tokens=10,
+        )
+
+
+def test_cli_scroll_correction_completes_after_one_verified_upward_move():
+    result = BrowserAgent(
+        RunConfig(
+            goal="you're just scrolling down scroll up",
+            start_url="https://example.com/results",
+        ),
+        decision_engine=ScrollChoiceEngine(),
+        browser_factory=ScrollingBrowser,
+    ).run()
+
+    assert result.status == "completed"
+    assert len(result.steps) == 1
+    assert result.steps[0].executed_action == "scroll_up"
 
 
 def test_authentication_boundary_stops_without_attempting_credentials():

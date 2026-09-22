@@ -10,11 +10,15 @@ from openultra_browser.models import (
 )
 from openultra_browser.task_progress import (
     TaskProgress,
+    click_outcome_evidence,
     error_blocks_progress,
     login_blocks_progress,
+    requested_scroll_direction,
     split_task_steps,
     step_completion_disposition,
     summarize_page_change,
+    verified_scroll_step,
+    verified_skip_ad_step,
 )
 
 
@@ -58,19 +62,23 @@ def test_stateful_action_is_its_own_atomic_step():
     )
 
 
+def test_scroll_and_later_click_remain_ordered_steps():
+    assert split_task_steps("scroll down and click More") == ("scroll down", "click More")
+    assert (
+        requested_scroll_direction("you're just scrolling down scroll up") == ActionKind.SCROLL_UP
+    )
+    assert split_task_steps("play the video and skip the ad") == ("play the video", "skip the ad")
+
+
 def test_date_open_and_date_change_are_separate_atomic_outcomes():
-    assert split_task_steps(
-        "Click on Thu, Jan 28 and change the date to September 28th"
-    ) == (
+    assert split_task_steps("Click on Thu, Jan 28 and change the date to September 28th") == (
         "Click on Thu, Jan 28",
         "change the date to September 28th",
     )
 
 
 def test_visible_start_destination_advances_without_model_inference():
-    progress = TaskProgress.from_goal(
-        "Go to wdxproperties.com and click Condos for rent"
-    )
+    progress = TaskProgress.from_goal("Go to wdxproperties.com and click Condos for rent")
 
     progress.sync_visible_state(snapshot("https://www.wdxproperties.com/"))
 
@@ -100,9 +108,7 @@ def test_search_and_its_submit_click_are_one_atomic_step():
 
 
 def test_confirmed_current_step_advances_exactly_once():
-    progress = TaskProgress.from_goal(
-        "Open Condos for rent and click Inquire in the first listing"
-    )
+    progress = TaskProgress.from_goal("Open Condos for rent and click Inquire in the first listing")
     result = snapshot("https://wdxproperties.com/properties/rent", "Rental listings")
 
     progress.advance_current_step(result, action_count=3)
@@ -172,9 +178,7 @@ def test_previous_step_evidence_cannot_complete_the_next_step():
 def test_exploration_change_cannot_unlock_step_confirmation():
     progress = TaskProgress(("Click Inquire",), history_boundary=0)
 
-    disposition = step_completion_disposition(
-        progress, decision(0.8), (record("scroll_down"),)
-    )
+    disposition = step_completion_disposition(progress, decision(0.8), (record("scroll_down"),))
 
     assert disposition == "pending"
 
@@ -182,9 +186,7 @@ def test_exploration_change_cannot_unlock_step_confirmation():
 def test_filling_search_does_not_complete_it_before_submission():
     progress = TaskProgress(("Search for Neon AI stream",), history_boundary=0)
 
-    disposition = step_completion_disposition(
-        progress, decision(0.99), (record("fill"),)
-    )
+    disposition = step_completion_disposition(progress, decision(0.99), (record("fill"),))
 
     assert disposition == "pending"
 
@@ -235,12 +237,93 @@ def test_content_detail_click_does_not_complete_before_navigation_is_observed():
 def test_changed_exact_play_control_completes_without_an_extra_side_effect():
     progress = TaskProgress(("play any video",), history_boundary=0)
     click = record("click")
-    click.description = (
-        "Activate button Play (k). Direct goal match: YES. Matched terms: play."
-    )
-    click.change_summary = "Added controls: Pause"
+    click.description = "Activate button Play (k). Direct goal match: YES. Matched terms: play."
+    click.change_summary = "Added controls: Pause | Click outcome: new visible controls Pause"
 
     assert step_completion_disposition(progress, decision(0.1), (click,)) == "verified"
+
+
+def test_unrelated_page_change_does_not_verify_a_click():
+    progress = TaskProgress(("click Play",))
+    click = record("click")
+    click.description = "Activate button Play. Direct goal match: YES."
+    click.change_summary = "Added controls: unrelated live counter"
+
+    assert step_completion_disposition(progress, decision(0.99), (click,)) == "pending"
+
+
+def test_click_outcome_uses_selected_control_state():
+    target = CandidateAction("click_e1", ActionKind.CLICK, "Click Like", element_id="e1")
+    before = BrowserSnapshot(
+        "https://example.com/watch",
+        "Watch",
+        "Video",
+        (ObservedElement("e1", "button", "Like", "button", pressed=False),),
+    )
+    after = BrowserSnapshot(
+        before.url,
+        before.title,
+        before.visible_text,
+        (ObservedElement("e1", "button", "Like", "button", pressed=True),),
+    )
+
+    assert click_outcome_evidence(target, before, after) == (
+        "Click outcome: selected control changed pressed"
+    )
+
+
+def test_remounted_unchanged_controls_are_not_new_click_evidence():
+    target = CandidateAction("click_e1", ActionKind.CLICK, "Click Open", element_id="e1")
+    before = BrowserSnapshot(
+        "https://example.com",
+        "Page",
+        "Same content",
+        (ObservedElement("e1", "button", "Open", "button"),),
+    )
+    after = BrowserSnapshot(
+        before.url,
+        before.title,
+        before.visible_text,
+        (ObservedElement("e2", "button", "Open", "button"),),
+    )
+
+    assert click_outcome_evidence(target, before, after) is None
+
+
+def test_skip_ad_requires_control_to_disappear_on_same_page():
+    progress = TaskProgress(("skip the ad",))
+    target = CandidateAction("click_skip", ActionKind.CLICK, "Skip Ad", element_id="skip")
+    before = BrowserSnapshot(
+        "https://example.com/watch",
+        "Watch",
+        "Ad",
+        (ObservedElement("skip", "button", "Skip Ad", "button"),),
+    )
+    after = BrowserSnapshot(before.url, "Watch", "Video", ())
+    still_ad = BrowserSnapshot(before.url, "Watch", "Ad", before.elements)
+
+    assert verified_skip_ad_step(progress, target, before, after)
+    assert not verified_skip_ad_step(progress, target, before, still_ad)
+    assert not verified_skip_ad_step(
+        progress,
+        target,
+        before,
+        BrowserSnapshot("https://example.com/other", "Other", "Video", ()),
+    )
+
+
+def test_scroll_completion_requires_real_movement_in_requested_direction():
+    progress = TaskProgress(("scroll up",))
+    scrolled = record("scroll_up")
+    scrolled.change_summary = "Scrolled up from y=1120 to y=560"
+    wrong_direction = record("scroll_down")
+    wrong_direction.change_summary = "Scrolled down from y=1120 to y=1680"
+    unexpected_movement = record("scroll_up")
+    unexpected_movement.change_summary = "Scrolled down from y=1120 to y=1680"
+
+    assert verified_scroll_step(progress, (scrolled,))
+    assert not verified_scroll_step(progress, (wrong_direction,))
+    assert not verified_scroll_step(progress, (unexpected_movement,))
 
 
 def test_navigation_does_not_claim_a_stateful_dislike_step_completed():
@@ -255,6 +338,9 @@ def test_semantic_change_with_mid_confidence_requests_focused_confirmation():
     progress = TaskProgress(("Click Inquire",), history_boundary=0)
     matching = record("click")
     matching.description = "Activate button Inquire"
+    matching.change_summary = (
+        "Added controls: Contact form | Click outcome: new visible controls Contact form"
+    )
 
     disposition = step_completion_disposition(progress, decision(0.7), (matching,))
 
@@ -312,9 +398,7 @@ def test_optional_login_does_not_block_a_direct_semantic_action():
 
 def test_optional_header_login_does_not_block_exploration():
     model = replace(decision(0.0), login_probability=0.8)
-    scroll = CandidateAction(
-        "scroll_down", ActionKind.SCROLL_DOWN, "Scroll down", goal_match=True
-    )
+    scroll = CandidateAction("scroll_down", ActionKind.SCROLL_DOWN, "Scroll down", goal_match=True)
     page = BrowserSnapshot(
         "https://wdxproperties.com/",
         "Thailand Property and Real Estate Portal",
@@ -399,9 +483,7 @@ def test_model_error_does_not_block_without_browser_alert_evidence():
 def test_browser_alert_blocks_when_no_recovery_action_remains():
     model = replace(decision(0.0), error_probability=0.9)
     page = replace(snapshot("https://example.com"), alerts=("Request rejected",))
-    scroll = CandidateAction(
-        "scroll_down", ActionKind.SCROLL_DOWN, "Scroll down", goal_match=True
-    )
+    scroll = CandidateAction("scroll_down", ActionKind.SCROLL_DOWN, "Scroll down", goal_match=True)
 
     assert error_blocks_progress(model, page, (scroll,))
 
@@ -409,8 +491,6 @@ def test_browser_alert_blocks_when_no_recovery_action_remains():
 def test_browser_alert_does_not_block_a_direct_recovery_action():
     model = replace(decision(0.0), error_probability=0.9)
     page = replace(snapshot("https://example.com"), alerts=("Required field",))
-    fill = CandidateAction(
-        "fill_name", ActionKind.FILL, "Fill name", "e1", goal_match=True
-    )
+    fill = CandidateAction("fill_name", ActionKind.FILL, "Fill name", "e1", goal_match=True)
 
     assert not error_blocks_progress(model, page, (fill,))

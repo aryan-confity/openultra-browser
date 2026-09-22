@@ -5,12 +5,24 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from urllib.parse import parse_qsl, urljoin, urlparse
 
-from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedElement, ObservedOption
-from .task_progress import step_requests_submission
+from .models import (
+    ActionKind,
+    BrowserSnapshot,
+    CandidateAction,
+    ObservedElement,
+    ObservedOption,
+    ObservedTab,
+)
+from .task_progress import (
+    SKIP_AD_CONTROL,
+    requested_scroll_direction,
+    requests_skip_ad,
+    step_requests_submission,
+)
 
 OBSERVE_SCRIPT = r"""
 ({ textLimit }) => {
@@ -169,6 +181,7 @@ OBSERVE_SCRIPT = r"""
     elements,
     can_scroll_up: scrollY > 0,
     can_scroll_down: scrollY + innerHeight < document.documentElement.scrollHeight - 2,
+    scroll_y: scrollY,
     can_go_back: Boolean(document.referrer),
     alerts,
   };
@@ -195,6 +208,7 @@ def decode_observation(raw: dict | None) -> BrowserSnapshot:
         elements=elements,
         can_scroll_up=bool(raw.get("can_scroll_up")),
         can_scroll_down=bool(raw.get("can_scroll_down")),
+        scroll_y=float(raw.get("scroll_y", 0)),
         can_go_back=bool(raw.get("can_go_back")),
         alerts=tuple(raw.get("alerts", ())),
     )
@@ -368,9 +382,7 @@ def _url_has_submitted_value(url: str, value: str) -> bool:
     parsed = urlparse(url)
     candidates = [candidate for _, candidate in parse_qsl(parsed.query)]
     if "?" in parsed.fragment:
-        candidates.extend(
-            candidate for _, candidate in parse_qsl(parsed.fragment.split("?", 1)[1])
-        )
+        candidates.extend(candidate for _, candidate in parse_qsl(parsed.fragment.split("?", 1)[1]))
     return any(" ".join(candidate.casefold().split()) == expected for candidate in candidates)
 
 
@@ -444,9 +456,13 @@ def _requested_calendar_date(goal: str, observed: list[date]) -> date | None:
         return None
     month = MONTHS[match.group(1).casefold()]
     day = int(match.group(2))
-    years = [int(match.group(3))] if match.group(3) else range(
-        min(item.year for item in observed) - 1,
-        max(item.year for item in observed) + 2,
+    years = (
+        [int(match.group(3))]
+        if match.group(3)
+        else range(
+            min(item.year for item in observed) - 1,
+            max(item.year for item in observed) + 2,
+        )
     )
     candidates: list[date] = []
     for year in years:
@@ -474,6 +490,535 @@ def _has_calendar_request(goal: str) -> bool:
     )
 
 
+def _explicit_actions(
+    snapshot: BrowserSnapshot, goal: str, include_done: bool
+) -> tuple[CandidateAction, ...] | None:
+    if include_done:
+        return (
+            CandidateAction(
+                "done",
+                ActionKind.DONE,
+                "Finish because every ordered task step has verified browser progress",
+            ),
+        )
+    scroll_direction = requested_scroll_direction(goal)
+    if scroll_direction:
+        available = (
+            snapshot.can_scroll_up
+            if scroll_direction == ActionKind.SCROLL_UP
+            else snapshot.can_scroll_down
+        )
+        if available:
+            direction = "up" if scroll_direction == ActionKind.SCROLL_UP else "down"
+            return (
+                CandidateAction(
+                    f"scroll_{direction}",
+                    scroll_direction,
+                    f"Scroll {direction}. Explicit user direction: YES.",
+                    goal_match=True,
+                ),
+            )
+        return (
+            CandidateAction(
+                "blocked",
+                ActionKind.BLOCKED,
+                "The page cannot scroll farther in the requested direction",
+            ),
+        )
+    if requests_skip_ad(goal):
+        skip_controls = tuple(
+            CandidateAction(
+                f"click_{item.element_id}",
+                ActionKind.CLICK,
+                f"Activate visible {item.semantic_description}. Skip control: YES.",
+                element_id=item.element_id,
+                goal_match=True,
+            )
+            for item in snapshot.elements
+            if item.role in {"button", "clickable"} and SKIP_AD_CONTROL.search(item.name)
+        )
+        return skip_controls or (
+            CandidateAction(
+                "blocked",
+                ActionKind.BLOCKED,
+                "No visible Skip Ad control is available on this page",
+            ),
+        )
+    return None
+
+
+@dataclass(frozen=True)
+class _ElementFacts:
+    score: float
+    target_url: str | None
+    goal_match: bool
+    verifier_match: bool
+    preferred_match: bool
+    suffix: str
+
+
+@dataclass
+class _ActionBuilder:
+    snapshot: BrowserSnapshot
+    goal: str
+    prepared_inputs: Mapping[str, str]
+    max_candidates: int
+    success_url_prefix: str | None
+    success_url_regex: str | None
+    preferred_domains: frozenset[str]
+    context_goal: str | None
+    ranked: list[tuple[float, CandidateAction]] = field(default_factory=list)
+    strong_action_ids: set[str] = field(default_factory=set)
+    calendar_transition_pending: bool = False
+    back_requested: bool = False
+    scroll_is_only_progress: bool = False
+
+    def __post_init__(self) -> None:
+        self.matching_goal = self.goal if _goal_terms(self.goal) else self.context_goal or self.goal
+        self.elements_by_id = {item.element_id: item for item in self.snapshot.elements}
+
+    def _facts(self, element: ObservedElement) -> _ElementFacts:
+        target_url = urljoin(self.snapshot.url, element.href) if element.href else None
+        prefix_match = bool(
+            self.success_url_prefix and target_url and target_url.startswith(self.success_url_prefix)
+        )
+        regex_match = bool(
+            self.success_url_regex and target_url and re.search(self.success_url_regex, target_url)
+        )
+        preferred_match = bool(
+            target_url
+            and urlparse(self.snapshot.url).hostname not in self.preferred_domains
+            and urlparse(target_url).hostname in self.preferred_domains
+        )
+        verifier_match = prefix_match or regex_match
+        score = (
+            _score(element, self.matching_goal)
+            + (40 if verifier_match else 0)
+            + (30 if preferred_match else 0)
+        )
+        content_detail_match = _content_detail_match(
+            element, self.matching_goal, self.snapshot.url
+        )
+        suffix = (
+            (" Destination matches the required success URL: YES." if verifier_match else "")
+            + (
+                " Destination is an explicitly approved non-start domain: YES."
+                if preferred_match else ""
+            )
+            + (
+                " Visible content-detail destination for the requested item: YES."
+                if content_detail_match else ""
+            )
+            + _goal_match(element, self.matching_goal)
+        )
+        return _ElementFacts(
+            score=score,
+            target_url=target_url,
+            goal_match=bool(_matched_goal_terms(element, self.matching_goal))
+            or content_detail_match or verifier_match,
+            verifier_match=verifier_match,
+            preferred_match=preferred_match,
+            suffix=suffix,
+        )
+
+    def rank_elements(self) -> None:
+        for element in self.snapshot.elements:
+            element_stateful = _tokens(element.goal_description) & STATEFUL_CONTROL_VERBS
+            if element_stateful and not element_stateful & _goal_terms(self.matching_goal):
+                continue
+            facts = self._facts(element)
+            editable = element.role in {"textbox", "searchbox", "spinbutton"} or (
+                element.role == "combobox" and element.tag != "select"
+            )
+            if editable:
+                self._rank_editable(element, facts)
+            elif element.tag == "select":
+                self._rank_select(element, facts)
+            else:
+                self._rank_click(element, facts)
+
+    def _rank_editable(self, element: ObservedElement, facts: _ElementFacts) -> None:
+        for input_key in _prepared_keys_for_element(element, self.prepared_inputs):
+            if _prepared_value_is_satisfied(
+                input_key, element.value, self.prepared_inputs[input_key]
+            ):
+                continue
+            self.ranked.append(
+                (
+                    facts.score + 20 + (4 if input_key.lower() in _tokens(element.description) else 0),
+                    CandidateAction(
+                        f"fill_{element.element_id}_{input_key}",
+                        ActionKind.FILL,
+                        f"Enter prepared '{input_key}' into {element.semantic_description}."
+                        " Prepared value directly advances the goal: YES." + facts.suffix,
+                        element.element_id,
+                        input_key=input_key,
+                        goal_match=True,
+                    ),
+                )
+            )
+        if (
+            element.submit_on_enter
+            and element.value
+            and step_requests_submission(self.goal)
+            and not _url_has_submitted_value(self.snapshot.url, element.value)
+        ):
+            action = CandidateAction(
+                f"submit_{element.element_id}",
+                ActionKind.PRESS_ENTER,
+                f"Submit the current search from {element.semantic_description}. "
+                "Deterministic planner: the field has a value and still needs submission: YES."
+                + _goal_match(element, self.matching_goal),
+                element.element_id,
+                goal_match=True,
+            )
+            self.ranked.append((facts.score + 35, action))
+            self.strong_action_ids.add(action.action_id)
+        self.ranked.append(
+            (
+                facts.score - 1,
+                CandidateAction(
+                    f"click_{element.element_id}",
+                    ActionKind.CLICK,
+                    f"Open or focus {element.semantic_description}." + facts.suffix,
+                    element.element_id,
+                    goal_match=facts.goal_match,
+                ),
+            )
+        )
+
+    def _rank_select(self, element: ObservedElement, facts: _ElementFacts) -> None:
+        prepared_keys = _prepared_keys_for_element(element, self.prepared_inputs)
+        desired = self.prepared_inputs[prepared_keys[0]] if prepared_keys else None
+        options = [
+            (index, option)
+            for index, option in enumerate(element.options[:8])
+            if desired is None
+            or desired.casefold() in {option.label.casefold(), option.value.casefold()}
+        ]
+        for index, option in options:
+            option_goal_match = (
+                bool(_goal_terms(self.matching_goal) & _tokens(option.label)) or desired is not None
+            )
+            self.ranked.append(
+                (
+                    facts.score + (20 if option_goal_match else 0),
+                    CandidateAction(
+                        f"select_{element.element_id}_{index}",
+                        ActionKind.SELECT,
+                        f"Select '{option.label}' in {element.description}." + facts.suffix,
+                        element.element_id,
+                        option=option.label,
+                        option_value=option.value,
+                        goal_match=facts.goal_match or option_goal_match,
+                    ),
+                )
+            )
+
+    def _rank_click(self, element: ObservedElement, facts: _ElementFacts) -> None:
+        action = CandidateAction(
+            f"click_{element.element_id}",
+            ActionKind.CLICK,
+            f"Activate {element.description}." + facts.suffix,
+            element.element_id,
+            target_url=facts.target_url,
+            goal_match=facts.goal_match or facts.preferred_match,
+        )
+        self.ranked.append((facts.score, action))
+        if facts.verifier_match or facts.preferred_match:
+            self.strong_action_ids.add(action.action_id)
+
+    def promote_complete_matches(self) -> None:
+        goal_terms = _goal_terms(self.matching_goal)
+        if len(goal_terms) < 2:
+            return
+        complete_match_ids = {
+            element.element_id
+            for element in self.snapshot.elements
+            if _matched_goal_terms(element, self.matching_goal) == goal_terms
+        }
+        self.strong_action_ids.update(
+            action.action_id
+            for _, action in self.ranked
+            if action.element_id in complete_match_ids
+            and action.kind in {
+                ActionKind.CLICK, ActionKind.FILL, ActionKind.PRESS_ENTER, ActionKind.SELECT
+            }
+        )
+
+    def promote_calendar(self) -> None:
+        observed_dates = []
+        for element in self.snapshot.elements:
+            if not element.date_value:
+                continue
+            try:
+                observed_dates.append(date.fromisoformat(element.date_value))
+            except ValueError:
+                continue
+        requested_date = _requested_calendar_date(self.goal, observed_dates)
+        self.calendar_transition_pending = bool(
+            _has_calendar_request(self.goal)
+            and not observed_dates
+            and any(element.name.startswith("Done.") for element in self.snapshot.elements)
+        )
+        if requested_date:
+            self._promote_calendar_date(requested_date, observed_dates)
+        if self.calendar_transition_pending:
+            self.ranked = []
+            self.strong_action_ids.clear()
+
+    def _promote_calendar_date(self, requested_date: date, observed_dates: list[date]) -> None:
+        exact_ids = {
+            element.element_id
+            for element in self.snapshot.elements
+            if element.date_value == requested_date.isoformat()
+        }
+        if exact_ids:
+            self._promote_calendar_targets(
+                exact_ids,
+                f" Exact requested calendar date {requested_date.isoformat()}: YES.",
+            )
+            return
+        first, last = min(observed_dates), max(observed_dates)
+        direction = None
+        if requested_date < first:
+            direction = "previous"
+        elif requested_date > last:
+            direction = "next"
+        if direction:
+            target_ids = {
+                item.element_id for item in self.snapshot.elements
+                if item.name.strip().casefold() == direction
+            }
+            self._promote_calendar_targets(
+                target_ids,
+                f" Requested date {requested_date.isoformat()} is {direction} of "
+                f"the visible calendar range {first.isoformat()} to {last.isoformat()}: YES.",
+            )
+
+    def _promote_calendar_targets(self, element_ids: set[str], fact: str) -> None:
+        promoted = []
+        for score, action in self.ranked:
+            if action.element_id in element_ids and action.kind == ActionKind.CLICK:
+                action = replace(
+                    action, description=action.description + fact, goal_match=True
+                )
+                score += 90
+                self.strong_action_ids.add(action.action_id)
+            promoted.append((score, action))
+        self.ranked = promoted
+
+    def narrow_form(self) -> None:
+        pending = any(
+            action.kind in {ActionKind.FILL, ActionKind.SELECT} and action.goal_match
+            for _, action in self.ranked
+        )
+        if not pending:
+            return
+        form_control_ids = {
+            f"click_{element.element_id}"
+            for element in self.snapshot.elements
+            if element.role in {"checkbox", "radio", "switch"}
+        }
+        self.ranked = [
+            (score, action)
+            for score, action in self.ranked
+            if action.kind in {ActionKind.FILL, ActionKind.SELECT}
+            or action.action_id in form_control_ids
+        ]
+        self.strong_action_ids.intersection_update(
+            action.action_id for _, action in self.ranked
+        )
+
+    def narrow_search_submit(self) -> None:
+        pending_ids = {
+            action.action_id
+            for _, action in self.ranked
+            if action.kind == ActionKind.PRESS_ENTER and action.goal_match
+        }
+        if pending_ids:
+            self.ranked = [
+                (score, action)
+                for score, action in self.ranked
+                if action.action_id in pending_ids
+            ]
+            self.strong_action_ids.intersection_update(pending_ids)
+
+    def promote_first(self) -> None:
+        if "first" not in _tokens(self.goal):
+            return
+        first_matching_click = next(
+            (
+                action.action_id
+                for _, action in self.ranked
+                if action.kind == ActionKind.CLICK and action.goal_match
+            ),
+            None,
+        )
+        if first_matching_click:
+            self.ranked = [
+                (
+                    score + 25,
+                    replace(
+                        action,
+                        description=action.description
+                        + " Requested ordinal: FIRST visible matching target: YES.",
+                    ),
+                )
+                if action.action_id == first_matching_click else (score, action)
+                for score, action in self.ranked
+                if not (
+                    action.kind == ActionKind.CLICK
+                    and action.goal_match
+                    and action.action_id != first_matching_click
+                )
+            ]
+
+    def add_tabs(self) -> None:
+        goal_tokens = _tokens(self.goal)
+        tab_intent = bool(
+            goal_tokens & {"tab", "tabs"}
+            and goal_tokens & {"back", "change", "focus", "open", "return", "switch"}
+        )
+        self.back_requested = bool(
+            re.search(r"\b(?:go|switch|return)\s+back\b", self.goal, re.IGNORECASE)
+        )
+        back_to_tab = not self.snapshot.can_go_back and self.back_requested
+        inactive_tabs = [tab for tab in self.snapshot.tabs if not tab.active]
+        previous_tab_id = inactive_tabs[-1].target_id if inactive_tabs else None
+        if not (tab_intent or back_to_tab):
+            return
+        for tab in inactive_tabs:
+            tab_terms = _tokens(f"{tab.title} {urlparse(tab.url).hostname or ''}")
+            matches = sorted(_goal_terms(self.goal) & tab_terms)
+            is_previous = back_to_tab and tab.target_id == previous_tab_id
+            self.ranked.append(self._tab_candidate(tab, matches, is_previous))
+
+    @staticmethod
+    def _tab_candidate(
+        tab: ObservedTab, matches: list[str], is_previous: bool
+    ) -> tuple[float, CandidateAction]:
+        goal_match = bool(matches) or is_previous
+        facts = " Direct goal match: no."
+        if goal_match:
+            detail = "This is the most recently active prior tab."
+            if not is_previous:
+                detail = f"Matched terms: {', '.join(matches)}."
+            facts = " Direct goal match: YES. " + detail
+        return (
+            80 + len(matches) * 5 + (20 if is_previous else 0),
+            CandidateAction(
+                action_id=f"switch_tab_{tab.target_id}",
+                kind=ActionKind.SWITCH_TAB,
+                description=f"Focus browser tab | {tab.title} | {tab.url}.{facts}",
+                browser_target_id=tab.target_id,
+                goal_match=goal_match,
+            ),
+        )
+
+    def filter_targets(self) -> None:
+        transition_pending = bool(
+            self.preferred_domains
+            and urlparse(self.snapshot.url).hostname not in self.preferred_domains
+        )
+        if self.strong_action_ids:
+            self.ranked = [
+                (score, action)
+                for score, action in self.ranked
+                if action.action_id in self.strong_action_ids
+            ]
+        elif transition_pending:
+            self.ranked = [
+                (score, action)
+                for score, action in self.ranked
+                if not action.target_url
+                or urlparse(action.target_url).hostname in self.preferred_domains
+            ]
+        has_direct_target = any(action.goal_match for _, action in self.ranked)
+        if not self.strong_action_ids and not transition_pending and has_direct_target:
+            self.ranked = [
+                (score, action) for score, action in self.ranked if action.goal_match
+            ]
+        meaningful = {
+            action.action_id
+            for _, action in self.ranked
+            if _is_meaningful_candidate(action, self.elements_by_id)
+        }
+        if meaningful:
+            self.ranked = [
+                (score, action)
+                for score, action in self.ranked
+                if action.action_id in meaningful
+            ]
+        self.scroll_is_only_progress = not has_direct_target
+
+    def controls(self) -> list[CandidateAction]:
+        controls = []
+        visibly_busy = any(element.busy is True for element in self.snapshot.elements)
+        if self.calendar_transition_pending:
+            controls.append(self._calendar_control())
+        elif self.snapshot.can_scroll_down:
+            controls.append(self._scroll_down_control())
+        if self.snapshot.can_scroll_up and not self.calendar_transition_pending:
+            controls.append(
+                CandidateAction("scroll_up", ActionKind.SCROLL_UP, "Scroll up to earlier content")
+            )
+        if self.snapshot.can_go_back and not self.calendar_transition_pending:
+            controls.append(self._back_control())
+        if not self.calendar_transition_pending and (
+            visibly_busy or (self.scroll_is_only_progress and not self.snapshot.can_scroll_down)
+        ):
+            controls.append(
+                CandidateAction(
+                    "wait", ActionKind.WAIT,
+                    (
+                        "Wait briefly. Deterministic observer: a visible control is busy: YES."
+                        if visibly_busy else "Wait briefly for the page to update"
+                    ),
+                    goal_match=visibly_busy and self.scroll_is_only_progress,
+                )
+            )
+        return controls
+
+    def _scroll_down_control(self) -> CandidateAction:
+        description = "Scroll down for more content"
+        if self.scroll_is_only_progress:
+            description = (
+                "Scroll down. Deterministic planner: no direct target is visible and "
+                "unexplored content exists below: YES."
+            )
+        return CandidateAction(
+            "scroll_down", ActionKind.SCROLL_DOWN,
+            description, goal_match=self.scroll_is_only_progress,
+        )
+
+    def _back_control(self) -> CandidateAction:
+        description = "Return to the previous page"
+        if self.back_requested:
+            description = "Return to the previous page. Direct goal match: YES."
+        return CandidateAction(
+            "back", ActionKind.BACK, description, goal_match=self.back_requested
+        )
+
+    def _calendar_control(self) -> CandidateAction:
+        if self.snapshot.can_scroll_up:
+            return CandidateAction(
+                "scroll_up", ActionKind.SCROLL_UP,
+                "Scroll up to reveal the open calendar date grid", goal_match=True,
+            )
+        return CandidateAction(
+            "wait", ActionKind.WAIT,
+            "Wait briefly for the calendar month transition to finish", goal_match=True,
+        )
+
+    def finish(self) -> tuple[CandidateAction, ...]:
+        controls = self.controls()
+        self.ranked.sort(key=lambda item: (-item[0], item[1].action_id))
+        actions = [action for _, action in self.ranked[: self.max_candidates - len(controls)]]
+        actions.extend(controls)
+        return tuple(actions)
+
+
 def build_actions(
     snapshot: BrowserSnapshot,
     goal: str,
@@ -485,475 +1030,19 @@ def build_actions(
     preferred_domains: frozenset[str] = frozenset(),
     context_goal: str | None = None,
 ) -> tuple[CandidateAction, ...]:
-    if include_done:
-        return (
-            CandidateAction(
-                "done",
-                ActionKind.DONE,
-                "Finish because every ordered task step has verified browser progress",
-            ),
-        )
-
-    matching_goal = goal if _goal_terms(goal) else context_goal or goal
-    ranked: list[tuple[float, CandidateAction]] = []
-    strong_action_ids: set[str] = set()
-    elements_by_id = {element.element_id: element for element in snapshot.elements}
-    for element in snapshot.elements:
-        element_stateful = _tokens(element.goal_description) & STATEFUL_CONTROL_VERBS
-        if element_stateful and not element_stateful & _goal_terms(matching_goal):
-            continue
-        target_url = urljoin(snapshot.url, element.href) if element.href else None
-        prefix_match = bool(
-            success_url_prefix and target_url and target_url.startswith(success_url_prefix)
-        )
-        regex_match = bool(
-            success_url_regex and target_url and re.search(success_url_regex, target_url)
-        )
-        preferred_match = bool(
-            target_url
-            and urlparse(snapshot.url).hostname not in preferred_domains
-            and urlparse(target_url).hostname in preferred_domains
-        )
-        verifier_match = prefix_match or regex_match
-        score = _score(element, matching_goal) + (40 if verifier_match else 0) + (
-            30 if preferred_match else 0
-        )
-        label_goal_match = bool(_matched_goal_terms(element, matching_goal))
-        content_detail_match = _content_detail_match(
-            element, matching_goal, snapshot.url
-        )
-        goal_match = label_goal_match or content_detail_match or verifier_match
-        verifier_fact = (
-            " Destination matches the required success URL: YES."
-            if verifier_match
-            else ""
-        )
-        preferred_fact = (
-            " Destination is an explicitly approved non-start domain: YES."
-            if preferred_match
-            else ""
-        )
-        content_detail_fact = (
-            " Visible content-detail destination for the requested item: YES."
-            if content_detail_match
-            else ""
-        )
-        editable = element.role in {"textbox", "searchbox", "spinbutton"} or (
-            element.role == "combobox" and element.tag != "select"
-        )
-        if editable:
-            for input_key in _prepared_keys_for_element(element, prepared_inputs):
-                if _prepared_value_is_satisfied(
-                    input_key, element.value, prepared_inputs[input_key]
-                ):
-                    continue
-                prepared_goal_match = True
-                progress_fact = (
-                    " Prepared value directly advances the goal: YES."
-                    if prepared_goal_match
-                    else " Prepared value directly advances the goal: unknown."
-                )
-                ranked.append(
-                    (
-                        score
-                        + (20 if prepared_goal_match else 0)
-                        + (4 if input_key.lower() in _tokens(element.description) else 0),
-                        CandidateAction(
-                            f"fill_{element.element_id}_{input_key}",
-                            ActionKind.FILL,
-                            f"Enter prepared '{input_key}' into {element.semantic_description}."
-                            + progress_fact
-                            + verifier_fact
-                            + preferred_fact
-                            + content_detail_fact
-                            + _goal_match(element, matching_goal),
-                            element.element_id,
-                            input_key=input_key,
-                            goal_match=goal_match or prepared_goal_match,
-                        ),
-                    )
-                )
-            if (
-                element.submit_on_enter
-                and element.value
-                and step_requests_submission(goal)
-                and not _url_has_submitted_value(snapshot.url, element.value)
-            ):
-                action = CandidateAction(
-                    f"submit_{element.element_id}",
-                    ActionKind.PRESS_ENTER,
-                    f"Submit the current search from {element.semantic_description}. "
-                    "Deterministic planner: the field has a value and still needs submission: YES."
-                    + _goal_match(element, matching_goal),
-                    element.element_id,
-                    goal_match=True,
-                )
-                ranked.append((score + 35, action))
-                strong_action_ids.add(action.action_id)
-            ranked.append(
-                (
-                    score - 1,
-                    CandidateAction(
-                        f"click_{element.element_id}",
-                        ActionKind.CLICK,
-                        f"Open or focus {element.semantic_description}."
-                        + verifier_fact
-                        + preferred_fact
-                        + content_detail_fact
-                        + _goal_match(element, matching_goal),
-                        element.element_id,
-                        goal_match=goal_match,
-                    ),
-                )
-            )
-        elif element.tag == "select":
-            prepared_keys = _prepared_keys_for_element(element, prepared_inputs)
-            desired = prepared_inputs[prepared_keys[0]] if prepared_keys else None
-            options = [
-                (index, option)
-                for index, option in enumerate(element.options[:8])
-                if desired is None
-                or desired.casefold() in {option.label.casefold(), option.value.casefold()}
-            ]
-            for index, option in options:
-                option_goal_match = bool(
-                    _goal_terms(matching_goal) & _tokens(option.label)
-                ) or desired is not None
-                ranked.append(
-                    (
-                        score + (20 if option_goal_match else 0),
-                        CandidateAction(
-                            f"select_{element.element_id}_{index}",
-                            ActionKind.SELECT,
-                            f"Select '{option.label}' in {element.description}."
-                            + verifier_fact
-                            + preferred_fact
-                            + content_detail_fact
-                            + _goal_match(element, matching_goal),
-                            element.element_id,
-                            option=option.label,
-                            option_value=option.value,
-                            goal_match=goal_match or option_goal_match,
-                        ),
-                    )
-                )
-        else:
-            action = CandidateAction(
-                f"click_{element.element_id}",
-                ActionKind.CLICK,
-                f"Activate {element.description}."
-                + verifier_fact
-                + preferred_fact
-                + content_detail_fact
-                + _goal_match(element, matching_goal),
-                element.element_id,
-                target_url=target_url,
-                goal_match=goal_match or preferred_match,
-            )
-            ranked.append(
-                (
-                    score,
-                    action,
-                )
-            )
-            if verifier_match or preferred_match:
-                strong_action_ids.add(action.action_id)
-
-    goal_terms = _goal_terms(matching_goal)
-    if len(goal_terms) >= 2:
-        complete_match_ids = {
-            element.element_id
-            for element in snapshot.elements
-            if _matched_goal_terms(element, matching_goal) == goal_terms
-        }
-        if complete_match_ids:
-            strong_action_ids.update(
-                action.action_id
-                for _, action in ranked
-                if action.element_id in complete_match_ids
-                and action.kind
-                in {ActionKind.CLICK, ActionKind.FILL, ActionKind.PRESS_ENTER, ActionKind.SELECT}
-            )
-
-    observed_dates: list[date] = []
-    for element in snapshot.elements:
-        if not element.date_value:
-            continue
-        try:
-            observed_dates.append(date.fromisoformat(element.date_value))
-        except ValueError:
-            continue
-    requested_date = _requested_calendar_date(goal, observed_dates)
-    calendar_transition_pending = bool(
-        _has_calendar_request(goal)
-        and not observed_dates
-        and any(element.name.startswith("Done.") for element in snapshot.elements)
+    explicit = _explicit_actions(snapshot, goal, include_done)
+    if explicit is not None:
+        return explicit
+    builder = _ActionBuilder(
+        snapshot, goal, prepared_inputs, max_candidates,
+        success_url_prefix, success_url_regex, preferred_domains, context_goal,
     )
-    if requested_date:
-        exact_ids = {
-            element.element_id
-            for element in snapshot.elements
-            if element.date_value == requested_date.isoformat()
-        }
-        if exact_ids:
-            promoted: list[tuple[float, CandidateAction]] = []
-            for score, action in ranked:
-                if action.element_id in exact_ids and action.kind == ActionKind.CLICK:
-                    action = replace(
-                        action,
-                        description=(
-                            action.description
-                            + f" Exact requested calendar date {requested_date.isoformat()}: YES."
-                        ),
-                        goal_match=True,
-                    )
-                    score += 90
-                    strong_action_ids.add(action.action_id)
-                promoted.append((score, action))
-            ranked = promoted
-        else:
-            first, last = min(observed_dates), max(observed_dates)
-            direction = (
-                "previous"
-                if requested_date < first
-                else "next"
-                if requested_date > last
-                else None
-            )
-            if direction:
-                promoted = []
-                for score, action in ranked:
-                    element = elements_by_id.get(action.element_id or "")
-                    if (
-                        action.kind == ActionKind.CLICK
-                        and element
-                        and element.name.strip().casefold() == direction
-                    ):
-                        action = replace(
-                            action,
-                            description=(
-                                action.description
-                                + f" Requested date {requested_date.isoformat()} is {direction} of "
-                                f"the visible calendar range {first.isoformat()} to {last.isoformat()}: YES."
-                            ),
-                            goal_match=True,
-                        )
-                        score += 90
-                        strong_action_ids.add(action.action_id)
-                    promoted.append((score, action))
-                ranked = promoted
-
-    if calendar_transition_pending:
-        ranked = []
-        strong_action_ids.clear()
-
-    has_pending_form_value = any(
-        action.kind in {ActionKind.FILL, ActionKind.SELECT} and action.goal_match
-        for _, action in ranked
-    )
-    if has_pending_form_value:
-        form_control_ids = {
-            f"click_{element.element_id}"
-            for element in snapshot.elements
-            if element.role in {"checkbox", "radio", "switch"}
-        }
-        ranked = [
-            (score, action)
-            for score, action in ranked
-            if action.kind in {ActionKind.FILL, ActionKind.SELECT}
-            or action.action_id in form_control_ids
-        ]
-        # Strong matches were computed before pending form work narrowed the
-        # action space. Do not let a now-removed page recommendation erase the
-        # remaining prepared fill or select action.
-        remaining_action_ids = {action.action_id for _, action in ranked}
-        strong_action_ids.intersection_update(remaining_action_ids)
-
-    pending_search_submit_ids = {
-        action.action_id
-        for _, action in ranked
-        if action.kind == ActionKind.PRESS_ENTER and action.goal_match
-    }
-    if pending_search_submit_ids:
-        ranked = [
-            (score, action)
-            for score, action in ranked
-            if action.action_id in pending_search_submit_ids
-        ]
-        strong_action_ids.intersection_update(pending_search_submit_ids)
-
-    if "first" in _tokens(goal):
-        first_matching_click = next(
-            (
-                action.action_id
-                for _, action in ranked
-                if action.kind == ActionKind.CLICK and action.goal_match
-            ),
-            None,
-        )
-        if first_matching_click:
-            ranked = [
-                (
-                    score + 25,
-                    replace(
-                        action,
-                        description=(
-                            action.description
-                            + " Requested ordinal: FIRST visible matching target: YES."
-                        ),
-                    ),
-                )
-                if action.action_id == first_matching_click
-                else (score, action)
-                for score, action in ranked
-                if not (
-                    action.kind == ActionKind.CLICK
-                    and action.goal_match
-                    and action.action_id != first_matching_click
-                )
-            ]
-
-    goal_tokens = _tokens(goal)
-    tab_intent = bool(
-        goal_tokens & {"tab", "tabs"}
-        and goal_tokens & {"back", "change", "focus", "open", "return", "switch"}
-    )
-    back_requested = bool(
-        re.search(r"\b(?:go|switch|return)\s+back\b", goal, re.IGNORECASE)
-    )
-    back_to_tab = not snapshot.can_go_back and back_requested
-    inactive_tabs = [tab for tab in snapshot.tabs if not tab.active]
-    previous_tab_id = inactive_tabs[-1].target_id if inactive_tabs else None
-    if tab_intent or back_to_tab:
-        for tab in inactive_tabs:
-            tab_terms = _tokens(f"{tab.title} {urlparse(tab.url).hostname or ''}")
-            matches = sorted(_goal_terms(goal) & tab_terms)
-            is_previous = back_to_tab and tab.target_id == previous_tab_id
-            goal_match = bool(matches) or is_previous
-            facts = (
-                " Direct goal match: YES. "
-                + (
-                    "This is the most recently active prior tab."
-                    if is_previous
-                    else f"Matched terms: {', '.join(matches)}."
-                )
-                if goal_match
-                else " Direct goal match: no."
-            )
-            ranked.append(
-                (
-                    80 + len(matches) * 5 + (20 if is_previous else 0),
-                    CandidateAction(
-                        action_id=f"switch_tab_{tab.target_id}",
-                        kind=ActionKind.SWITCH_TAB,
-                        description=f"Focus browser tab | {tab.title} | {tab.url}.{facts}",
-                        browser_target_id=tab.target_id,
-                        goal_match=goal_match,
-                    ),
-                )
-            )
-
-    transition_pending = bool(
-        preferred_domains and urlparse(snapshot.url).hostname not in preferred_domains
-    )
-    if strong_action_ids:
-        ranked = [(score, action) for score, action in ranked if action.action_id in strong_action_ids]
-    elif transition_pending:
-        ranked = [
-            (score, action)
-            for score, action in ranked
-            if not action.target_url
-            or urlparse(action.target_url).hostname in preferred_domains
-        ]
-    has_direct_target = any(action.goal_match for _, action in ranked)
-    if not strong_action_ids and not transition_pending and has_direct_target:
-        ranked = [(score, action) for score, action in ranked if action.goal_match]
-
-    # Remove generic page chrome once the observer has labelled real controls.
-    # Content-detail links and exact matches above remain deterministic progress;
-    # otherwise scrolling is the bounded exploration action.
-    meaningful_action_ids = {
-        action.action_id
-        for _, action in ranked
-        if _is_meaningful_candidate(action, elements_by_id)
-    }
-    if meaningful_action_ids:
-        ranked = [
-            (score, action)
-            for score, action in ranked
-            if action.action_id in meaningful_action_ids
-        ]
-    scroll_is_only_progress = not has_direct_target
-
-    controls: list[CandidateAction] = []
-    visibly_busy = any(element.busy is True for element in snapshot.elements)
-    if calendar_transition_pending:
-        if snapshot.can_scroll_up:
-            controls.append(
-                CandidateAction(
-                    "scroll_up",
-                    ActionKind.SCROLL_UP,
-                    "Scroll up to reveal the open calendar date grid",
-                    goal_match=True,
-                )
-            )
-        else:
-            controls.append(
-                CandidateAction(
-                    "wait",
-                    ActionKind.WAIT,
-                    "Wait briefly for the calendar month transition to finish",
-                    goal_match=True,
-                )
-            )
-    elif snapshot.can_scroll_down:
-        controls.append(
-            CandidateAction(
-                "scroll_down",
-                ActionKind.SCROLL_DOWN,
-                (
-                    "Scroll down. Deterministic planner: no direct target is visible and "
-                    "unexplored content exists below: YES."
-                    if scroll_is_only_progress
-                    else "Scroll down for more content"
-                ),
-                goal_match=scroll_is_only_progress,
-            )
-        )
-    if snapshot.can_scroll_up and not calendar_transition_pending:
-        controls.append(
-            CandidateAction("scroll_up", ActionKind.SCROLL_UP, "Scroll up to earlier content")
-        )
-    if snapshot.can_go_back and not calendar_transition_pending:
-        controls.append(
-            CandidateAction(
-                "back",
-                ActionKind.BACK,
-                (
-                    "Return to the previous page. Direct goal match: YES."
-                    if back_requested
-                    else "Return to the previous page"
-                ),
-                goal_match=back_requested,
-            )
-        )
-    if not calendar_transition_pending and (
-        visibly_busy or (not has_direct_target and not snapshot.can_scroll_down)
-    ):
-        controls.append(
-            CandidateAction(
-                "wait",
-                ActionKind.WAIT,
-                (
-                    "Wait briefly. Deterministic observer: a visible control is busy: YES."
-                    if visibly_busy
-                    else "Wait briefly for the page to update"
-                ),
-                goal_match=visibly_busy and not has_direct_target,
-            )
-        )
-    reserved = len(controls)
-    ranked.sort(key=lambda item: (-item[0], item[1].action_id))
-    actions = [action for _, action in ranked[: max_candidates - reserved]]
-    actions.extend(controls)
-    return tuple(actions)
+    builder.rank_elements()
+    builder.promote_complete_matches()
+    builder.promote_calendar()
+    builder.narrow_form()
+    builder.narrow_search_submit()
+    builder.promote_first()
+    builder.add_tabs()
+    builder.filter_targets()
+    return builder.finish()

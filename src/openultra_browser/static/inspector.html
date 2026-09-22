@@ -21,10 +21,10 @@
         <form id="task-form">
           <div class="task-heading">
             <label for="goal">Task</label>
-            <div class="input-mode" role="group" aria-label="Task input mode">
+            <fieldset class="input-mode" aria-label="Task input mode">
               <button id="text-mode" class="active" type="button" aria-pressed="true">Text</button>
               <button id="voice-mode" type="button" aria-pressed="false">Voice</button>
-            </div>
+            </fieldset>
           </div>
           <textarea id="goal" rows="6" required autofocus placeholder="Describe what you want the browser to do"></textarea>
           <div class="voice-state" id="voice-state" hidden aria-live="polite">

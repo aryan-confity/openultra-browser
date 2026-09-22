@@ -3,7 +3,7 @@ import json
 from openultra_browser.browser import StalePage
 from openultra_browser.config import RunConfig
 from openultra_browser.interactive import InteractiveAgent
-from openultra_browser.models import BrowserSnapshot, ModelDecision, ObservedElement
+from openultra_browser.models import ActionKind, BrowserSnapshot, ModelDecision, ObservedElement
 
 
 class FakeBrowser:
@@ -222,4 +222,157 @@ def test_retask_preserves_browser_and_current_page_while_resetting_run_state():
     assert agent.context_actions[0].result_url == "https://example.com/result"
     assert agent.previous_page.url == "https://example.com/search"
     assert state["elapsed_ms"] < 100
+    agent.close()
+
+
+class ScrollBrowser:
+    def __init__(self, _url, *, text_limit):
+        self.snapshot = BrowserSnapshot(
+            "https://example.com/results",
+            "Results",
+            "More content",
+            (),
+            can_scroll_up=True,
+            can_scroll_down=True,
+            scroll_y=1120,
+        )
+        self.executions = 0
+
+    def observe(self):
+        return self.snapshot
+
+    def screenshot(self):
+        return None
+
+    def act(self, action, _snapshot, _prepared_inputs):
+        self.executions += 1
+        assert action.kind == ActionKind.SCROLL_UP
+        self.snapshot = BrowserSnapshot(
+            self.snapshot.url,
+            self.snapshot.title,
+            self.snapshot.visible_text,
+            (),
+            can_scroll_up=True,
+            can_scroll_down=True,
+            scroll_y=560,
+        )
+
+    def close(self):
+        pass
+
+
+class ScrollEngine:
+    def decide(self, *, actions, **_kwargs):
+        return ModelDecision(
+            proposed_action="scroll_up",
+            probabilities={
+                action.action_id: float(action.action_id == "scroll_up") for action in actions
+            },
+            confidence=1.0,
+            goal_probability=0.0,
+            stuck_probability=0.0,
+            inference_ms=1.0,
+            input_tokens=10,
+        )
+
+
+def test_spoken_scroll_correction_moves_up_once_and_completes():
+    agent = InteractiveAgent(
+        config(
+            goal="you're just scrolling down scroll up",
+            start_url="https://example.com/results",
+            prepared_inputs={},
+        ),
+        decision_engine=ScrollEngine(),
+        browser_factory=ScrollBrowser,
+    )
+
+    predicted = agent.predict()
+    result = agent.act(predicted["page"]["fingerprint"])
+
+    assert result["status"] == "completed"
+    assert agent.browser.executions == 1
+    assert result["history"][0]["executed_action"] == "scroll_up"
+    agent.close()
+
+
+class SkipBrowser:
+    def __init__(self, _url, *, text_limit):
+        self.snapshot = BrowserSnapshot(
+            "https://example.com/watch",
+            "Watch",
+            "Advertisement",
+            (ObservedElement("skip", "button", "Skip Ad", "button"),),
+        )
+        self.executions = 0
+
+    def observe(self):
+        return self.snapshot
+
+    def screenshot(self):
+        return None
+
+    def act(self, action, _snapshot, _prepared_inputs):
+        assert action.element_id == "skip"
+        self.executions += 1
+        self.snapshot = BrowserSnapshot(
+            self.snapshot.url,
+            "Watch",
+            "Now playing the requested video",
+            (),
+        )
+
+    def close(self):
+        pass
+
+
+class SkipEngine:
+    def decide(self, *, actions, **_kwargs):
+        selected = next(action.action_id for action in actions if action.element_id == "skip")
+        return ModelDecision(
+            proposed_action=selected,
+            probabilities={
+                action.action_id: float(action.action_id == selected) for action in actions
+            },
+            confidence=1.0,
+            goal_probability=0.0,
+            stuck_probability=0.0,
+            inference_ms=1.0,
+            input_tokens=10,
+        )
+
+
+def test_skip_ad_completion_requires_observed_control_disappearance():
+    agent = InteractiveAgent(
+        config(goal="skip the ad", start_url="https://example.com/watch", prepared_inputs={}),
+        decision_engine=SkipEngine(),
+        browser_factory=SkipBrowser,
+    )
+
+    predicted = agent.predict()
+    result = agent.act(predicted["page"]["fingerprint"])
+
+    assert result["status"] == "completed"
+    assert "Skip Ad control disappeared" in result["history"][0]["change_summary"]
+    agent.close()
+
+
+class UnchangedSkipBrowser(SkipBrowser):
+    def act(self, action, _snapshot, _prepared_inputs):
+        assert action.element_id == "skip"
+        self.executions += 1
+
+
+def test_skip_ad_click_without_result_is_not_completion():
+    agent = InteractiveAgent(
+        config(goal="skip the ad", start_url="https://example.com/watch", prepared_inputs={}),
+        decision_engine=SkipEngine(),
+        browser_factory=UnchangedSkipBrowser,
+    )
+
+    predicted = agent.predict()
+    result = agent.act(predicted["page"]["fingerprint"])
+
+    assert result["status"] != "completed"
+    assert not result["history"][0]["changed"]
     agent.close()

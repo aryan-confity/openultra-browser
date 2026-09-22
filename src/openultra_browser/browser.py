@@ -7,6 +7,7 @@ import re
 import sys
 import time
 from dataclasses import replace
+from typing import cast
 from urllib.parse import urlparse
 
 from browser_harness.admin import ensure_daemon
@@ -14,6 +15,9 @@ from browser_harness.helpers import cdp
 
 from .models import ActionKind, BrowserSnapshot, CandidateAction, ObservedTab
 from .observation import OBSERVE_SCRIPT, decode_observation
+
+READY_STATE = "document.readyState"
+MOUSE_EVENT = "Input.dispatchMouseEvent"
 
 
 class ExecutionUncertain(RuntimeError):
@@ -212,7 +216,7 @@ class Browser:
         self.call("Page.navigate", url=url)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            if self.evaluate("document.readyState") in {"interactive", "complete"}:
+            if self.evaluate(READY_STATE) in {"interactive", "complete"}:
                 return
             time.sleep(0.02)
         self.close()
@@ -259,28 +263,11 @@ class Browser:
         deadline = time.monotonic() + timeout_seconds
         while True:
             pages = self._page_targets()
-            child_targets = [
-                item
-                for target_id, item in pages.items()
-                if target_id not in before_targets
-            ]
-            candidates = [
-                item
-                for item in child_targets
-                if _is_http_url(item.get("url"))
-            ]
+            child_targets = [item for target_id, item in pages.items() if target_id not in before_targets]
+            candidates = [item for item in child_targets if _is_http_url(item.get("url"))]
             if candidates:
-                target = candidates[-1]["targetId"]
-                self._bind_target(target)
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    try:
-                        if self.evaluate("document.readyState") in {"interactive", "complete"}:
-                            self._wait_for_semantic_quiet(quiet_ms=125, timeout_ms=1_500)
-                            return True
-                    except RuntimeError:
-                        pass
-                    time.sleep(0.02)
+                self._bind_target(candidates[-1]["targetId"])
+                self._wait_for_new_target_ready()
                 return True
             if timeout_seconds > 0 and child_targets and any(
                 item.get("url") in {None, "", "about:blank"} for item in child_targets
@@ -288,6 +275,17 @@ class Browser:
                 deadline = max(deadline, started + 5.0)
             if time.monotonic() >= deadline:
                 return False
+            time.sleep(0.02)
+
+    def _wait_for_new_target_ready(self) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                if self.evaluate(READY_STATE) in {"interactive", "complete"}:
+                    self._wait_for_semantic_quiet(quiet_ms=125, timeout_ms=1_500)
+                    return
+            except RuntimeError:
+                pass
             time.sleep(0.02)
 
     @property
@@ -360,11 +358,11 @@ class Browser:
         for attempt in range(10):
             try:
                 snapshot = decode_observation(self.evaluate(expression))
-                return replace(
+                return cast(BrowserSnapshot, replace(
                     snapshot,
                     can_go_back=self._can_go_back(snapshot.can_go_back),
                     tabs=self._observed_tabs(),
-                )
+                ))
             except RuntimeError:
                 if attempt == 9:
                     raise
@@ -389,6 +387,19 @@ class Browser:
         )
         if before_url != snapshot.url:
             raise StalePage("Page navigated after observation; refusing a stale action")
+        if action.kind in {
+            ActionKind.SWITCH_TAB,
+            ActionKind.SCROLL_DOWN,
+            ActionKind.SCROLL_UP,
+            ActionKind.BACK,
+            ActionKind.WAIT,
+            ActionKind.DONE,
+            ActionKind.BLOCKED,
+        }:
+            return self._act_page_action(action, before_url)
+        return self._act_element(action, snapshot, prepared_inputs, before_url, before_targets)
+
+    def _act_page_action(self, action: CandidateAction, before_url: str) -> bool:
         if action.kind == ActionKind.SWITCH_TAB:
             pages = self._page_targets()
             target_id = action.browser_target_id
@@ -406,7 +417,7 @@ class Browser:
             return True
         if action.kind == ActionKind.SCROLL_DOWN:
             self.call(
-                "Input.dispatchMouseEvent",
+                MOUSE_EVENT,
                 type="mouseWheel",
                 x=550,
                 y=650,
@@ -417,7 +428,7 @@ class Browser:
             return False
         if action.kind == ActionKind.SCROLL_UP:
             self.call(
-                "Input.dispatchMouseEvent",
+                MOUSE_EVENT,
                 type="mouseWheel",
                 x=550,
                 y=130,
@@ -438,8 +449,16 @@ class Browser:
         if action.kind == ActionKind.WAIT:
             time.sleep(0.1)
             return False
-        if action.kind in {ActionKind.DONE, ActionKind.BLOCKED}:
-            return False
+        return False
+
+    def _act_element(
+        self,
+        action: CandidateAction,
+        snapshot: BrowserSnapshot,
+        prepared_inputs: dict[str, str],
+        before_url: str,
+        before_targets: set[str],
+    ) -> bool:
         if not action.element_id:
             raise ValueError(f"{action.kind} requires an observed element")
 
@@ -450,82 +469,13 @@ class Browser:
             raise RuntimeError("Observed target is absent from the bound snapshot")
         if action.kind == ActionKind.FILL and action.input_key not in prepared_inputs:
             raise RuntimeError("Prepared input is unavailable")
-        is_submit = bool(
-            action.kind == ActionKind.CLICK
-            and element.role == "button"
-            and (
-                element.input_type == "submit"
-                or re.search(r"\b(?:send|submit)\b", element.name, re.IGNORECASE)
-            )
-        )
+        is_submit = self._is_submit_action(action, element)
         submission_started_at = self.evaluate("performance.now()") if is_submit else None
-        request = {
-            "nodeId": int(action.element_id.removeprefix("e")),
-            "expectedGuard": element.guard,
-            "kind": action.kind.value,
-            "selectLabel": action.option if action.kind == ActionKind.SELECT else None,
-            "selectValue": action.option_value if action.kind == ActionKind.SELECT else None,
-        }
+        target = self._validated_action_target(action, element)
         try:
-            target = self.evaluate(f"({VALIDATE_TARGET_SCRIPT})({json.dumps(request)})")
-        except RuntimeError as error:
-            if action.kind == ActionKind.SELECT:
-                raise ExecutionUncertain(
-                    "Dropdown change may have executed; inspect before retrying"
-                ) from error
-            raise StalePage("Document changed before browser input began") from error
-        if target is None:
-            raise StalePage("Observed target changed, became hidden, or is covered")
-        try:
-            calendar_dates = sorted(
-                item.date_value for item in snapshot.elements if item.date_value
-            )
-            calendar_range = (
-                (calendar_dates[0], calendar_dates[-1])
-                if element.name.strip().casefold() in {"previous", "next"}
-                and calendar_dates
-                else None
-            )
-            if action.kind == ActionKind.CLICK:
-                for event in ("mousePressed", "mouseReleased"):
-                    self.call(
-                        "Input.dispatchMouseEvent",
-                        type=event,
-                        x=target["x"],
-                        y=target["y"],
-                        button="left",
-                        clickCount=1,
-                    )
-                if self._adopt_new_target(before_targets):
-                    self.last_action_evidence = "Opened a new browser tab and focused it"
-                    return True
-            elif action.kind == ActionKind.FILL:
-                modifiers = 4 if sys.platform == "darwin" else 2
-                for event in ("keyDown", "keyUp"):
-                    self.call(
-                        "Input.dispatchKeyEvent",
-                        type=event,
-                        key="a",
-                        code="KeyA",
-                        modifiers=modifiers,
-                        commands=["selectAll"] if event == "keyDown" else [],
-                    )
-                self.call("Input.insertText", text=prepared_inputs[action.input_key])
-            elif action.kind == ActionKind.PRESS_ENTER:
-                for event in ("rawKeyDown", "keyUp"):
-                    self.call(
-                        "Input.dispatchKeyEvent",
-                        type=event,
-                        key="Enter",
-                        code="Enter",
-                        windowsVirtualKeyCode=13,
-                        nativeVirtualKeyCode=13,
-                    )
-                if self._adopt_new_target(before_targets):
-                    self.last_action_evidence = "Opened a new browser tab and focused it"
-                    return True
-            elif action.kind != ActionKind.SELECT:
-                raise ValueError(f"Unsupported action kind: {action.kind}")
+            calendar_range = self._calendar_range(element, snapshot)
+            if self._dispatch_element_input(action, target, prepared_inputs, before_targets):
+                return True
             return self._settle(
                 action.kind,
                 before_url=before_url,
@@ -543,6 +493,96 @@ class Browser:
             raise ExecutionUncertain(
                 "Browser input started but completion could not be confirmed; inspect before retrying"
             ) from error
+
+    @staticmethod
+    def _is_submit_action(action: CandidateAction, element: object) -> bool:
+        return bool(
+            action.kind == ActionKind.CLICK
+            and getattr(element, "role") == "button"
+            and (
+                getattr(element, "input_type") == "submit"
+                or re.search(r"\b(?:send|submit)\b", getattr(element, "name"), re.IGNORECASE)
+            )
+        )
+
+    def _validated_action_target(self, action: CandidateAction, element: object) -> dict:
+        request = {
+            "nodeId": int(action.element_id.removeprefix("e")),
+            "expectedGuard": getattr(element, "guard"),
+            "kind": action.kind.value,
+            "selectLabel": action.option if action.kind == ActionKind.SELECT else None,
+            "selectValue": action.option_value if action.kind == ActionKind.SELECT else None,
+        }
+        try:
+            target = self.evaluate(f"({VALIDATE_TARGET_SCRIPT})({json.dumps(request)})")
+        except RuntimeError as error:
+            if action.kind == ActionKind.SELECT:
+                raise ExecutionUncertain(
+                    "Dropdown change may have executed; inspect before retrying"
+                ) from error
+            raise StalePage("Document changed before browser input began") from error
+        if target is None:
+            raise StalePage("Observed target changed, became hidden, or is covered")
+        return target
+
+    @staticmethod
+    def _calendar_range(element: object, snapshot: BrowserSnapshot) -> tuple[str, str] | None:
+        if getattr(element, "name").strip().casefold() not in {"previous", "next"}:
+            return None
+        dates = sorted(item.date_value for item in snapshot.elements if item.date_value)
+        return (dates[0], dates[-1]) if dates else None
+
+    def _dispatch_element_input(
+        self,
+        action: CandidateAction,
+        target: dict,
+        prepared_inputs: dict[str, str],
+        before_targets: set[str],
+    ) -> bool:
+        if action.kind == ActionKind.CLICK:
+            for event in ("mousePressed", "mouseReleased"):
+                self.call(
+                    MOUSE_EVENT,
+                    type=event,
+                    x=target["x"],
+                    y=target["y"],
+                    button="left",
+                    clickCount=1,
+                )
+        elif action.kind == ActionKind.FILL:
+            self._fill_target(prepared_inputs[action.input_key])
+        elif action.kind == ActionKind.PRESS_ENTER:
+            self._press_enter()
+        elif action.kind != ActionKind.SELECT:
+            raise ValueError(f"Unsupported action kind: {action.kind}")
+        if action.kind in {ActionKind.CLICK, ActionKind.PRESS_ENTER} and self._adopt_new_target(before_targets):
+            self.last_action_evidence = "Opened a new browser tab and focused it"
+            return True
+        return False
+
+    def _fill_target(self, value: str) -> None:
+        modifiers = 4 if sys.platform == "darwin" else 2
+        for event in ("keyDown", "keyUp"):
+            self.call(
+                "Input.dispatchKeyEvent",
+                type=event,
+                key="a",
+                code="KeyA",
+                modifiers=modifiers,
+                commands=["selectAll"] if event == "keyDown" else [],
+            )
+        self.call("Input.insertText", text=value)
+
+    def _press_enter(self) -> None:
+        for event in ("rawKeyDown", "keyUp"):
+            self.call(
+                "Input.dispatchKeyEvent",
+                type=event,
+                key="Enter",
+                code="Enter",
+                windowsVirtualKeyCode=13,
+                nativeVirtualKeyCode=13,
+            )
 
     def _settle(
         self,
@@ -593,40 +633,12 @@ class Browser:
             )
             return False
         if kind == ActionKind.PRESS_ENTER and expect_navigation and before_url:
-            navigated = self._wait_for_navigation(before_url)
-            if not navigated:
-                submitted = self.evaluate(
-                    """(() => {
-                      const field = document.activeElement;
-                      const form = field?.form;
-                      if (!form || typeof form.requestSubmit !== 'function') return false;
-                      form.requestSubmit();
-                      return true;
-                    })()"""
-                )
-                if submitted:
-                    self._wait_for_navigation(before_url)
+            self._settle_enter(before_url)
             return False
         if expect_navigation and before_url:
             return self._wait_for_navigation(before_url)
         if submission_started_at is not None and before_url:
-            outcome = self.evaluate(
-                f"({SUBMISSION_OUTCOME_SCRIPT})({json.dumps({'startedAt': submission_started_at, 'beforeUrl': before_url, 'timeoutMs': 8_000})})",
-                await_promise=True,
-            )
-            if outcome and outcome.get("status") and outcome["status"] >= 400:
-                self.last_action_evidence = (
-                    f"Submission request reached {outcome.get('path') or 'the site'} "
-                    f"and received HTTP {outcome['status']}; it was not retried"
-                )
-                return True
-            if outcome and outcome.get("verified"):
-                status = f"HTTP {outcome['status']}" if outcome.get("status") else "navigation"
-                self.last_action_evidence = (
-                    f"Submission request reached {outcome.get('path') or 'the destination'} "
-                    f"with {status} evidence"
-                )
-            return bool(outcome and outcome.get("verified"))
+            return self._settle_submission(before_url, submission_started_at)
         if calendar_range:
             self.evaluate(
                 f"""new Promise((resolve) => {{
@@ -660,6 +672,40 @@ class Browser:
             pass
         return False
 
+    def _settle_enter(self, before_url: str) -> None:
+        if self._wait_for_navigation(before_url):
+            return
+        submitted = self.evaluate(
+            """(() => {
+              const field = document.activeElement;
+              const form = field?.form;
+              if (!form || typeof form.requestSubmit !== 'function') return false;
+              form.requestSubmit();
+              return true;
+            })()"""
+        )
+        if submitted:
+            self._wait_for_navigation(before_url)
+
+    def _settle_submission(self, before_url: str, started_at: float) -> bool:
+        outcome = self.evaluate(
+            f"({SUBMISSION_OUTCOME_SCRIPT})({json.dumps({'startedAt': started_at, 'beforeUrl': before_url, 'timeoutMs': 8_000})})",
+            await_promise=True,
+        )
+        if outcome and outcome.get("status") and outcome["status"] >= 400:
+            self.last_action_evidence = (
+                f"Submission request reached {outcome.get('path') or 'the site'} "
+                f"and received HTTP {outcome['status']}; it was not retried"
+            )
+            return True
+        if outcome and outcome.get("verified"):
+            status = f"HTTP {outcome['status']}" if outcome.get("status") else "navigation"
+            self.last_action_evidence = (
+                f"Submission request reached {outcome.get('path') or 'the destination'} "
+                f"with {status} evidence"
+            )
+        return bool(outcome and outcome.get("verified"))
+
     def _wait_for_semantic_quiet(
         self, *, quiet_ms: int = 100, timeout_ms: int = 1_500
     ) -> None:
@@ -674,7 +720,7 @@ class Browser:
             try:
                 current_url = self.url
                 if current_url != before_url:
-                    if self.evaluate("document.readyState") in {"interactive", "complete"}:
+                    if self.evaluate(READY_STATE) in {"interactive", "complete"}:
                         self._wait_for_semantic_quiet(quiet_ms=125, timeout_ms=1_500)
                         return True
             except RuntimeError:
