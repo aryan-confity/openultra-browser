@@ -2,9 +2,9 @@
 
 OpenUltra is an open-source browser agent that turns a text or spoken task into a sequence of observed, checked browser actions. Tell the browser what outcome you want, watch it work, and correct or continue it from the page it reached. Its default 421M-parameter Laya decision model runs locally on Apple Silicon: **no network calls for browser decisions and $0 hosted-model API cost**. One local batch evaluates the next operation, compatible targets, and completion evidence, so repeated decisions can be fast without sending page content to a model service. Browser navigation still uses the network, and total task time depends on site behavior.
 
-[![OpenUltra navigating a YouTube search and opening a video](docs/demo-poster.jpg)](docs/demo.mp4)
+[![Animated OpenUltra browser demo navigating a YouTube task](docs/demo.gif)](docs/demo.mp4)
 
-[Watch the 71-second demo](docs/demo.mp4) | [How it works](#how-it-works) | [Current limits](#current-limits)
+[Watch the complete 71-second demo](docs/demo.mp4) | [How it works](#how-it-works) | [Current limits](#current-limits)
 
 ## Quick start
 
